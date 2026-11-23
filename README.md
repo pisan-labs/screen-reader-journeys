@@ -128,3 +128,8 @@ Chromium reports: `button`, `link`, `combobox`, `checkbox`, `heading` and so on.
 
 Announcements are an approximation. The walker reports a live region's whole text after each
 change; real screen readers also apply `aria-atomic`, `aria-relevant` and their own timing.
+
+## Licence
+
+MIT, see [LICENSE](LICENSE). Third-party code and dependencies are listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
