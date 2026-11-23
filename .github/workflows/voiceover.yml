@@ -1,0 +1,51 @@
+# Real VoiceOver, on a Mac registered as a self-hosted runner with the label "voiceover"
+# (see docs/voiceover.md). Start it by hand from the Actions tab.
+name: VoiceOver
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: "Site to test"
+        required: true
+      journeys:
+        description: "Journey files or folders, separated by spaces"
+        default: "targets/stem-accessibility"
+
+permissions:
+  contents: read
+
+concurrency:
+  # One VoiceOver run at a time: it takes over the Mac's screen reader and keyboard.
+  group: voiceover
+  cancel-in-progress: false
+
+jobs:
+  voiceover:
+    runs-on: [self-hosted, macOS, voiceover]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npx playwright install webkit
+      - name: Run journeys with VoiceOver
+        id: run
+        env:
+          BASE_URL: ${{ inputs.base_url }}
+          JOURNEYS: ${{ inputs.journeys }}
+        run: node src/cli.js run $JOURNEYS --base-url "$BASE_URL" --mode voiceover --out reports
+        continue-on-error: true
+      - name: Summary
+        if: always()
+        run: cat reports/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: voiceover-reports
+          path: reports
+      - name: Fail if a journey failed
+        if: steps.run.outcome == 'failure'
+        run: exit 1

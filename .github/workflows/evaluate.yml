@@ -1,0 +1,71 @@
+# Run journeys against a site (for example a pull request's Vercel preview) and keep the
+# transcripts as a downloadable artifact. Start it by hand from the Actions tab, or call it from
+# another repository's workflow with `uses: pisan-labs/screen-reader-journeys/.github/workflows/evaluate.yml@main`.
+name: Evaluate a site
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: "Site to test, e.g. https://frontend-git-<branch>-stem-accessibility.vercel.app"
+        required: true
+      journeys:
+        description: "Journey files or folders, separated by spaces"
+        default: "targets/stem-accessibility"
+      modes:
+        description: "Modes: walker, virtual"
+        default: "walker,virtual"
+  workflow_call:
+    inputs:
+      base_url:
+        type: string
+        required: true
+      journeys:
+        type: string
+        default: "targets/stem-accessibility"
+      modes:
+        type: string
+        default: "walker,virtual"
+      tool_ref:
+        description: "Version of this tool to use"
+        type: string
+        default: "main"
+
+permissions:
+  contents: read
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    steps:
+      # When another repository calls this workflow, check out this tool, not the caller.
+      - uses: actions/checkout@v4
+        with:
+          repository: pisan-labs/screen-reader-journeys
+          ref: ${{ inputs.tool_ref || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Run journeys
+        id: run
+        env:
+          BASE_URL: ${{ inputs.base_url }}
+          JOURNEYS: ${{ inputs.journeys }}
+          MODES: ${{ inputs.modes }}
+        # JOURNEYS is left unquoted on purpose: it is a list of paths.
+        run: node src/cli.js run $JOURNEYS --base-url "$BASE_URL" --mode "$MODES" --out reports
+        continue-on-error: true
+      - name: Summary
+        if: always()
+        run: cat reports/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screen-reader-journeys-reports
+          path: reports
+      - name: Fail if a journey failed
+        if: steps.run.outcome == 'failure'
+        run: exit 1

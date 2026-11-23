@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>srj test page</title>
+    <style>
+      .no-ring:focus { outline: none; }
+    </style>
+  </head>
+  <body>
+    <a href="#main">Skip to content</a>
+    <main id="main">
+      <h1>Test page</h1>
+      <button id="save">Save</button>
+      <!-- Problems the tool should find: -->
+      <button id="icon" class="no-ring"><svg aria-hidden="true" width="10" height="10"></svg></button>
+      <div tabindex="0" class="no-ring">Clickable div</div>
+      <div aria-hidden="true"><button id="hidden">Hidden button</button></div>
+      <p role="status" id="status"></p>
+    </main>
+    <script>
+      document.getElementById("save").addEventListener("click", () => {
+        document.getElementById("status").textContent = "Saved.";
+      });
+    </script>
+  </body>
+</html>
