@@ -219,6 +219,8 @@ describe("egress proxy", () => {
     assert.equal(await tunnel(`127.0.0.1:${other.address().port}`), 403);
     assert.equal(await tunnel(`[::1]:443`), 403);
     assert.equal(await tunnel(`rebind.example.com:443`), 403);
+    assert.equal(await tunnel("localhost:80"), 403);
+    assert.ok(proxy.blocked.some((b) => b.startsWith("localhost:80 ")), "a tunnel to port 80 is checked as port 80");
     assert.deepEqual(hits.filter((h) => h.includes("secret")), []);
     assert.ok(proxy.blocked.some((b) => b.startsWith(`127.0.0.1:${other.address().port}`)), proxy.blocked.join("\n"));
   });

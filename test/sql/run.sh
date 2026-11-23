@@ -52,15 +52,15 @@ claim="begin; select test.act_as('service_role'); select base_url from public.cl
 # The first worker claims and holds its transaction open for 3 seconds.
 "${psql[@]}" -At -c "$claim select pg_sleep(3); commit;" | grep -v '^$' >"$work/first" &
 sleep 1
-start=$(date +%s)
+start=$(date +%s%N)
 second=$("${psql[@]}" -At -c "$claim commit;" | grep -v '^$' || true)
-elapsed=$(($(date +%s) - start))
+elapsed=$((($(date +%s%N) - start) / 1000000))
 wait
 first=$(cat "$work/first")
-echo "  first: $first, second: $second, second took ${elapsed}s"
+echo "  first: $first, second: $second, second took ${elapsed} ms"
 [ "$first" = "https://one.vercel.app/" ] || { echo "the first worker should claim the older run" >&2; exit 1; }
 [ "$second" = "https://two.vercel.app/" ] || { echo "the second worker should skip the locked run and claim the other" >&2; exit 1; }
-[ "$elapsed" -lt 2 ] || { echo "the second worker waited for the first (no SKIP LOCKED?)" >&2; exit 1; }
+[ "$elapsed" -lt 1500 ] || { echo "the second worker waited for the first (no SKIP LOCKED?)" >&2; exit 1; }
 "${psql[@]}" -At -c "select test.check((select count(*) from public.runs where status = 'running' and base_url in ('https://one.vercel.app/', 'https://two.vercel.app/')) = 2, 'both claimed runs are running')" >/dev/null
 
 echo "SQL checks passed"

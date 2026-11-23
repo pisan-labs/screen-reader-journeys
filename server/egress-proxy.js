@@ -68,7 +68,8 @@ export async function startEgressProxy({ rules, lookup, idleMs = 60000 } = {}) {
     client.on("error", () => {});
     let url;
     try {
-      url = new URL(`http://${req.url}`);
+      // As https, so only 443 reads as the default port; 80 (ws:// in Chromium) stays explicit.
+      url = new URL(`https://${req.url}`);
     } catch {
       client.end("HTTP/1.1 400 Bad Request\r\n\r\n");
       return;
