@@ -2,7 +2,7 @@
 // results. One run at a time. `admin` is a Supabase client with the service role key (or a
 // fake with the same methods, in the tests).
 
-import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
+import { chown, mkdir, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { extname, join, sep } from "node:path";
 import { findJourney } from "./catalog.js";
@@ -116,19 +116,38 @@ export function createWorker({ admin, catalog, config, execute = executeRun, loo
     check("saving results", await admin.from("run_results").insert(rows));
   }
 
+  /**
+   * A private folder for the run: reports/ for its output and home/ for the browser's own files.
+   * With `runAs`, both belong to that user, the only one the run process can write as.
+   */
+  async function makeWorkDir() {
+    const workDir = await mkdtemp(join(tmpdir(), "srj-run-"));
+    const outDir = join(workDir, "reports");
+    const home = join(workDir, "home");
+    await mkdir(outDir);
+    await mkdir(home);
+    if (config.runAs) for (const dir of [workDir, outDir, home]) await chown(dir, config.runAs.uid, config.runAs.gid);
+    return { workDir, outDir, home };
+  }
+
   /** Run one claimed run to the end. Never throws for a problem with the run itself. */
   async function processRun(run) {
-    log.log(`run ${run.id}: started (${run.base_url})`);
-    // Check again: a user can insert a queued run straight into the table, past the API.
-    const request = validateRunRequest(run, { catalog, rules: config.targetRules });
-    if (!request.ok) return finish(run, { status: "failed", error: `Refused: ${request.errors.map((e) => e.message).join(" ")}` });
-    const target = new URL(request.value.base_url);
-    const egress = await resolveEgress(target.hostname, Number(target.port || (target.protocol === "https:" ? 443 : 80)), config.targetRules, lookup);
-    if (!egress.ok) return finish(run, { status: "failed", error: `Refused: ${egress.reason}.` });
-
-    const outDir = await mkdtemp(join(tmpdir(), "srj-run-"));
+    // Set before anything slow, so that a shutdown from here on puts the run back in the queue.
     current = new AbortController();
+    if (stopping) current.abort();
+    let workDir = null;
     try {
+      log.log(`run ${run.id}: started (${run.base_url})`);
+      // Check again: a user can insert a queued run straight into the table, past the API.
+      const request = validateRunRequest(run, { catalog, rules: config.targetRules });
+      if (!request.ok) return await finish(run, { status: "failed", error: `Refused: ${request.errors.map((e) => e.message).join(" ")}` });
+      const target = new URL(request.value.base_url);
+      const egress = await resolveEgress(target.hostname, Number(target.port || (target.protocol === "https:" ? 443 : 80)), config.targetRules, lookup);
+      if (!egress.ok) return await finish(run, { status: "failed", error: `Refused: ${egress.reason}.` });
+
+      const dirs = await makeWorkDir();
+      workDir = dirs.workDir;
+      const outDir = dirs.outDir;
       const job = {
         baseUrl: request.value.base_url,
         journeys: request.value.journeys.map((path) => ({ path, file: findJourney(catalog, path).file })),
@@ -137,7 +156,8 @@ export function createWorker({ admin, catalog, config, execute = executeRun, loo
         allowedTargetHosts: config.allowedTargetHosts,
         chromiumSandbox: config.chromiumSandbox,
       };
-      const outcome = await execute(job, { timeoutMs: config.runTimeoutMs, signal: current.signal });
+      const runAs = config.runAs ? { ...config.runAs, home: dirs.home } : null;
+      const outcome = await execute(job, { timeoutMs: config.runTimeoutMs, signal: current.signal, runAs });
       if (outcome.outcome === "aborted") {
         // The server is shutting down (a deploy, say): put the run back for the next instance.
         check("requeueing", await admin.from("runs").update({ status: "queued", started_at: null }).eq("id", run.id).eq("status", "running"));
@@ -155,17 +175,21 @@ export function createWorker({ admin, catalog, config, execute = executeRun, loo
           : short(outcome.error ?? "The run failed.");
       return await finish(run, { status: "failed", error, summary });
     } catch (error) {
+      // The details (storage and database messages) go to the log, not to the user.
       log.error(`run ${run.id}: ${error.stack ?? error}`);
-      await finish(run, { status: "failed", error: `The server could not finish this run: ${short(error.message)}` }).catch((e) => log.error(e.message));
+      await finish(run, { status: "failed", error: "The server could not finish this run. Try again, or ask the administrator to check the server log." }).catch((e) =>
+        log.error(e.message)
+      );
     } finally {
       current = null;
-      await rm(outDir, { recursive: true, force: true });
+      if (workDir) await rm(workDir, { recursive: true, force: true });
     }
   }
 
   /** Claim and process one run. Resolves to true if there was one. */
   async function tick() {
     await failStaleRuns();
+    if (stopping) return false; // do not claim a run this server would have to give back
     const run = await claim();
     if (!run) return false;
     await processRun(run);

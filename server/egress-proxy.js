@@ -12,6 +12,7 @@ import { createServer, request as httpRequest } from "node:http";
 import { connect } from "node:net";
 import { resolveEgress } from "./hosts.js";
 
+const MAX_BLOCKED = 50;
 const HOP_BY_HOP = new Set(["connection", "keep-alive", "proxy-connection", "proxy-authorization", "proxy-authenticate", "te", "trailer", "transfer-encoding", "upgrade"]);
 const strip = (headers) => Object.fromEntries(Object.entries(headers).filter(([name]) => !HOP_BY_HOP.has(name.toLowerCase())));
 
@@ -20,10 +21,16 @@ const strip = (headers) => Object.fromEntries(Object.entries(headers).filter(([n
  * where `blocked` lists the refused connections as "host:port (reason)".
  */
 export async function startEgressProxy({ rules, lookup, idleMs = 60000 } = {}) {
+  // Distinct refusals only, and at most MAX_BLOCKED of them: a page can make requests in a loop.
   const blocked = [];
+  const seen = new Set();
   const decide = async (host, port) => {
     const decision = await resolveEgress(host, port, rules, lookup);
-    if (!decision.ok) blocked.push(`${host}:${port} (${decision.reason})`);
+    const entry = `${host}:${port} (${decision.reason})`;
+    if (!decision.ok && blocked.length < MAX_BLOCKED && !seen.has(entry)) {
+      seen.add(entry);
+      blocked.push(entry);
+    }
     return decision;
   };
 

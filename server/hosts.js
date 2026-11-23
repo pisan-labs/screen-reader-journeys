@@ -105,7 +105,8 @@ export function checkTargetUrl(input, rules) {
 // Addresses a tested page must not reach unless the host is listed exactly: loopback, private
 // networks, link-local (cloud metadata), carrier-grade NAT, multicast, documentation and other
 // reserved ranges, and IPv6 forms that embed an IPv4 address. (BlockList checks IPv4-mapped
-// IPv6 addresses, ::ffff:a.b.c.d, against the IPv4 ranges itself.)
+// IPv6 addresses, ::ffff:a.b.c.d, against the IPv4 ranges itself; ::/96 covers ::, ::1 and the
+// IPv4-compatible ::a.b.c.d, and ::ffff:0:0:0/96 the IPv4-translated ::ffff:0:a.b.c.d.)
 const PRIVATE = new BlockList();
 for (const [net, prefix] of [
   ["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8], ["169.254.0.0", 16],
@@ -113,7 +114,7 @@ for (const [net, prefix] of [
   ["198.18.0.0", 15], ["198.51.100.0", 24], ["203.0.113.0", 24], ["224.0.0.0", 4], ["240.0.0.0", 4],
 ]) PRIVATE.addSubnet(net, prefix, "ipv4");
 for (const [net, prefix] of [
-  ["::", 128], ["::1", 128], ["64:ff9b::", 96], ["64:ff9b:1::", 48], ["100::", 64], ["2001::", 32],
+  ["::", 96], ["::ffff:0:0:0", 96], ["64:ff9b::", 96], ["64:ff9b:1::", 48], ["100::", 64], ["2001::", 32],
   ["2001:db8::", 32], ["2002::", 16], ["fc00::", 7], ["fe80::", 10], ["fec0::", 10], ["ff00::", 8],
 ]) PRIVATE.addSubnet(net, prefix, "ipv6");
 

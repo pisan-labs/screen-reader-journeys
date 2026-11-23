@@ -35,8 +35,8 @@ export async function runJob(job, send, { lookup } = {}) {
   const launchOptions = {
     proxy: { server: proxy.server },
     chromiumSandbox: !!job.chromiumSandbox,
-    // QUIC would not go through the proxy.
-    args: ["--disable-quic"],
+    // QUIC and WebRTC's UDP would not go through the proxy, so neither may be used.
+    args: ["--disable-quic", "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"],
   };
   const results = [];
   try {

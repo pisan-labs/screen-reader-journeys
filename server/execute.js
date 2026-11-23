@@ -5,27 +5,38 @@ import { fileURLToPath } from "node:url";
 
 const CHILD = fileURLToPath(new URL("./run-child.js", import.meta.url));
 
-// Nothing that looks like a credential reaches the process that drives the browser, and
-// Playwright's switch for letting loopback bypass the proxy is never inherited.
-const WITHHELD = /^SUPABASE_|KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL|^PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK$/i;
+// Only these variables reach the process that drives the browser: no credentials, and not
+// Playwright's switch for letting loopback bypass the proxy. SRJ_TEST_* are the self-tests' own.
+const PASSED = ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TZ", "NODE_ENV", "PLAYWRIGHT_BROWSERS_PATH"];
+const passes = (name) => PASSED.includes(name) || name.startsWith("SRJ_TEST_");
 
-export function childEnv(env = process.env) {
-  return Object.fromEntries(Object.entries(env).filter(([name]) => !WITHHELD.test(name)));
+export function childEnv(env = process.env, overrides = {}) {
+  const passed = Object.fromEntries(Object.entries(env).filter(([name, value]) => passes(name) && value !== undefined));
+  return { ...passed, ...overrides };
 }
 
 /**
  * Run `job` (see run-child.js) in a child process. Resolves, never rejects, with
  * `{ outcome: "done" | "timeout" | "aborted" | "error", error, results, blocked }`, where
  * `results` holds every journey and mode that finished, even after a timeout.
+ *
+ * `runAs: { uid, gid, home }` starts the process as that user, so that a page that breaks out of
+ * the browser cannot read this server's environment (its Supabase keys) through /proc. This
+ * server must then run as root, as it does in the Docker image.
  */
-export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000 } = {}) {
+export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs = null } = {}) {
   return new Promise((resolve) => {
     const results = [];
     const blocked = [];
     let outcome = null;
     let error = null;
     let settled = false;
-    const child = fork(CHILD, [], { env: childEnv(), stdio: ["ignore", "inherit", "inherit", "ipc"], serialization: "json" });
+    const child = fork(CHILD, [], {
+      env: childEnv(process.env, runAs?.home ? { HOME: runAs.home } : {}),
+      stdio: ["ignore", "inherit", "inherit", "ipc"],
+      serialization: "json",
+      ...(runAs ? { uid: runAs.uid, gid: runAs.gid } : {}),
+    });
 
     const stop = (why) => {
       outcome ??= why;

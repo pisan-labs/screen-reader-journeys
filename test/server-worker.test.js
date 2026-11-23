@@ -1,6 +1,9 @@
 // The hosted server's worker, with a fake Supabase client. The end-to-end tests run real
 // journeys in Chromium against local fixture sites, with the allowlist set to 127.0.0.1.
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import dgram from "node:dgram";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -11,6 +14,7 @@ import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { loadCatalog, REPO_ROOT } from "../server/catalog.js";
 import { childEnv } from "../server/execute.js";
+import { timeoutFetch } from "../server/timeout-fetch.js";
 import { parseAllowedHosts } from "../server/hosts.js";
 import { createWorker } from "../server/worker.js";
 import { fakeSupabase } from "./helpers/fake-supabase.js";
@@ -94,7 +98,13 @@ describe("worker, end to end", () => {
     });
     await new Promise((done) => internal.listen(0, "127.0.0.1", done));
     const internalOrigin = `http://127.0.0.1:${internal.address().port}`;
-    const page = readFileSync(join(fixtures, "egress.html"), "utf8").replaceAll("INTERNAL_ORIGIN", internalOrigin);
+    const stun = dgram.createSocket("udp4");
+    let stunPackets = 0;
+    stun.on("message", () => stunPackets++);
+    await new Promise((done) => stun.bind(0, "127.0.0.1", done));
+    const page = readFileSync(join(fixtures, "egress.html"), "utf8")
+      .replaceAll("INTERNAL_ORIGIN", internalOrigin)
+      .replaceAll("STUN_PORT", String(stun.address().port));
     const target = createServer((req, res) => {
       hits.push(`site ${req.url}`);
       if (req.url === "/egress.html") res.writeHead(200, { "Content-Type": "text/html" }).end(page);
@@ -115,9 +125,11 @@ describe("worker, end to end", () => {
       assert.match(blocked, new RegExp(`127\\.0\\.0\\.1:${internal.address().port} `));
       assert.match(blocked, new RegExp(`localhost:${target.address().port} `));
       assert.match(blocked, /169\.254\.169\.254:80 /);
+      assert.equal(stunPackets, 0, "WebRTC sent UDP straight to an internal address");
     } finally {
       internal.close();
       target.close();
+      stun.close();
     }
   });
 
@@ -224,9 +236,13 @@ describe("worker, with a fake run process", () => {
     const fake = fakeSupabase({ runs: [run] });
     fake.failures.push({ op: "insert", table: "run_results", error: { message: "connection reset" } });
     const execute = async () => ({ outcome: "done", error: null, results: [summary(BASIC, "walker")], blocked: [] });
-    await createWorker({ admin: fake, catalog, config, execute, lookup, log: quiet }).tick();
+    const logged = [];
+    await createWorker({ admin: fake, catalog, config, execute, lookup, log: { log() {}, error: (line) => logged.push(line) } }).tick();
     assert.equal(fake.run(run.id).status, "failed");
-    assert.match(fake.run(run.id).error, /could not finish this run: saving results: connection reset/);
+    // The user sees a plain sentence; the database's message goes to the log only.
+    assert.match(fake.run(run.id).error, /^The server could not finish this run\./);
+    assert.doesNotMatch(fake.run(run.id).error, /connection reset/);
+    assert.ok(logged.some((line) => /saving results: connection reset/.test(line)), logged.join("\n"));
   });
 
   it("puts a run back in the queue when the server shuts down during it", async () => {
@@ -276,8 +292,95 @@ describe("worker, with a fake run process", () => {
 });
 
 describe("run process environment", () => {
-  it("withholds the Supabase keys and anything that looks like a secret", () => {
-    const env = childEnv({ PATH: "/bin", HOME: "/home/x", PLAYWRIGHT_BROWSERS_PATH: "/ms-playwright", SUPABASE_URL: "u", SUPABASE_SERVICE_ROLE_KEY: "k", SUPABASE_ANON_KEY: "a", GITHUB_TOKEN: "t", AWS_SECRET_ACCESS_KEY: "s", DB_PASSWORD: "p", PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK: "1" });
+  it("passes only a short list of harmless variables", () => {
+    const env = childEnv({ PATH: "/bin", HOME: "/home/x", PLAYWRIGHT_BROWSERS_PATH: "/ms-playwright", SUPABASE_URL: "u", SUPABASE_SERVICE_ROLE_KEY: "k", SUPABASE_ANON_KEY: "a", GITHUB_TOKEN: "t", AWS_SECRET_ACCESS_KEY: "s", DB_PASSWORD: "p", DATABASE_URL: "postgres://u:p@h/db", RENDER_API: "x", PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK: "1" });
     assert.deepEqual(Object.keys(env).sort(), ["HOME", "PATH", "PLAYWRIGHT_BROWSERS_PATH"]);
+    assert.equal(childEnv({ HOME: "/root" }, { HOME: "/tmp/run/home" }).HOME, "/tmp/run/home");
+  });
+
+  const root = process.getuid?.() === 0;
+  it("as another user, cannot read the server's environment", { skip: !root && "needs root, as in the Docker image" }, async () => {
+    const probe = "try { require('fs').readFileSync('/proc/' + process.ppid + '/environ'); console.log('read'); } catch (e) { console.log(e.code); }";
+    const { stdout } = await promisify(execFile)(process.execPath, ["-e", probe], { uid: 10001, gid: 10001, env: childEnv(), cwd: "/" });
+    assert.equal(stdout.trim(), "EACCES");
+  });
+
+  it("as another user, still runs the journeys and uploads the reports", { skip: !root && "needs root, as in the Docker image" }, async () => {
+    const site = await serve(fixtures);
+    try {
+      const run = queued({ base_url: `${site.url}/`, journeys: [BASIC] });
+      const fake = fakeSupabase({ runs: [run] });
+      await createWorker({ admin: fake, catalog, config: configFor(new URL(site.url).host, { runAs: { uid: 10001, gid: 10001 } }), log: quiet }).tick();
+      assert.equal(fake.run(run.id).status, "done", fake.run(run.id).error);
+      assert.ok(fake.uploads.has(`reports/${run.id}/basic-test-page.walker.md`));
+      assert.ok(![...fake.uploads.keys()].some((k) => k.includes("/home/")), "the browser's own files are not uploaded");
+    } finally {
+      site.close();
+    }
+  });
+});
+
+describe("shutting down", () => {
+  const HOST = "good.example.org";
+  const config = configFor(HOST);
+  const lookup = async () => ["76.76.21.21"];
+
+  it("does not claim a run once stopping", async () => {
+    const fake = fakeSupabase({ runs: [queued({ base_url: `https://${HOST}/`, journeys: [BASIC] })] });
+    const worker = createWorker({ admin: fake, catalog, config, execute: async () => assert.fail("must not run"), lookup, log: quiet });
+    await worker.stop();
+    assert.equal(await worker.tick(), false);
+    assert.ok(!fake.calls.some((c) => c.op === "rpc"));
+  });
+
+  it("puts back a run claimed while it was stopping, without running it", async () => {
+    const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+    const fake = fakeSupabase({ runs: [run] });
+    const rpc = fake.rpc;
+    let claiming;
+    const claimed = new Promise((resolve) => (claiming = resolve));
+    let release;
+    const gate = new Promise((resolve) => (release = resolve));
+    fake.rpc = async (name) => {
+      claiming();
+      await gate;
+      return rpc(name);
+    };
+    let sawAbort = null;
+    const execute = async (job, { signal }) => {
+      sawAbort = signal.aborted;
+      return { outcome: signal.aborted ? "aborted" : "done", error: null, results: [], blocked: [] };
+    };
+    const worker = createWorker({ admin: fake, catalog, config, execute, lookup, log: quiet });
+    const ticking = worker.tick();
+    await claimed;
+    await worker.stop();
+    release();
+    await ticking;
+    assert.equal(sawAbort, true);
+    assert.equal(fake.run(run.id).status, "queued");
+  });
+});
+
+describe("Supabase requests", () => {
+  it("give up after the time limit", async () => {
+    const hang = (input, { signal }) => new Promise((resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason)));
+    // AbortSignal.timeout does not keep Node running by itself (the server's HTTP listener does).
+    const keepAlive = setTimeout(() => {}, 5000);
+    const started = Date.now();
+    try {
+      await assert.rejects(timeoutFetch(50, hang)("https://example.invalid/"), { name: "TimeoutError" });
+    } finally {
+      clearTimeout(keepAlive);
+    }
+    assert.ok(Date.now() - started < 2000);
+  });
+
+  it("still honour the caller's own signal", async () => {
+    const hang = (input, { signal }) => new Promise((resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason)));
+    const controller = new AbortController();
+    const pending = timeoutFetch(60000, hang)("https://example.invalid/", { signal: controller.signal });
+    controller.abort(new Error("caller stopped"));
+    await assert.rejects(pending, /caller stopped/);
   });
 });

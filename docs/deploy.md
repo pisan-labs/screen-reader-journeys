@@ -71,10 +71,10 @@ fill in the Netlify address.
      `https://deploy-preview-*--<site>.netlify.app/**` if you use deploy previews, and
      `http://127.0.0.1:5173/**` for local development.
 5. **Who may sign in.** By default anyone with an email address can create an account with a
-   magic link, and every account can make the server open the allowed sites in a browser. For a
-   private service, turn off *Allow new users to sign up* (*Authentication → Sign In / Providers*)
-   and invite people from *Authentication → Users*. The dashboard tells others to ask for an
-   invitation.
+   magic link, and every account can make the server open the allowed sites in a browser. **Turn
+   off** *Allow new users to sign up* (*Authentication → Sign In / Providers*) and invite people
+   from *Authentication → Users*. The dashboard tells others to ask for an invitation. Leave
+   sign-ups on only for a short, supervised trial.
 6. **Email.** Supabase's built-in email sender is for trying things out and sends only a few
    emails an hour. Set up your own SMTP server (*Authentication → Emails → SMTP Settings*) before
    other people use the service.
@@ -95,10 +95,11 @@ The dashboard uses the PKCE flow, so a magic link must be opened in the browser 
    | `SUPABASE_ANON_KEY` | the anon (publishable) key |
    | `SUPABASE_SERVICE_ROLE_KEY` | the service role (secret) key |
    | `ALLOWED_ORIGINS` | the dashboard's origin, `https://<site>.netlify.app`. Until Netlify exists, put any `https://` origin and change it later. Separate several with commas. |
-   | `ALLOWED_TARGET_HOSTS` | the sites the server may test, e.g. `*.vercel.app` (see below). Empty means none. |
+   | `ALLOWED_TARGET_HOSTS` | the sites the server may test, as exact hosts, e.g. `stem-accessibility.example.org` (see below). Empty means none. |
 
-   `RUN_TIMEOUT_SECONDS` (900) and `POLL_INTERVAL_SECONDS` (5) have defaults in `render.yaml`.
-   Render sets `PORT` itself. Leave `CHROMIUM_SANDBOX` unset (see [Security](#security)).
+   `RUN_TIMEOUT_SECONDS` (900) and `POLL_INTERVAL_SECONDS` (5) have defaults in `render.yaml`;
+   `SUPABASE_TIMEOUT_SECONDS` defaults to 30. Render sets `PORT` itself, and the Docker image sets
+   `RUN_AS_UID` and `RUN_AS_GID`. Leave `CHROMIUM_SANDBOX` unset (see [Security](#security)).
 3. **Plan.** `render.yaml` starts on the *free* plan, which costs nothing but sleeps after 15
    minutes without requests (a queued run waits until the next request wakes it, which takes about
    a minute) and has 512 MB of memory, which Chromium can exceed on large pages. For regular use,
@@ -241,20 +242,25 @@ domain only you control, where you can.
 ## Security
 
 - **Keys.** The service role key exists only in Render's environment. The run process that drives
-  the browser is started without it (and without any variable that looks like a secret). The
-  dashboard has only the anon key, which row-level security makes safe to publish.
+  the browser gets a short list of harmless variables (`PATH`, `HOME`, `LANG` and the like) and
+  runs as `runner`, an unprivileged user, while the server runs as root. So even a page that
+  breaks out of Chromium cannot read the server's environment through `/proc`. The dashboard has
+  only the anon key, which row-level security makes safe to publish.
 - **Network guard.** Pages under test are untrusted, and their scripts run in the server's
   Chromium. Every connection the browser makes goes through a proxy, local to the run, that
   refuses loopback, private-network, link-local (cloud metadata) and other reserved addresses
   unless the host is listed exactly in `ALLOWED_TARGET_HOSTS`. It resolves each host itself and
   connects to the address it checked, so a DNS answer that changes cannot redirect it. Requests a
   journey's own `setup` answers (the STEM-Accessibility mock) never leave the browser, so mocks
-  still work. WebRTC is not covered by the proxy.
+  still work. QUIC is turned off and WebRTC may not use UDP, since neither would go through the
+  proxy.
 - **Chromium's sandbox** is off by default, because it cannot start inside a standard Docker
-  container (Render's included). A Chromium exploit in a tested page could therefore reach the
-  container, where the server's environment holds the service role key. Keep the list of allowed
-  sites short and trusted, keep Playwright and the image up to date, and set
+  container (Render's included). A Chromium exploit in a tested page would therefore run as
+  `runner` inside the container: it could not read the server's keys, but it could use the
+  container's network outside the proxy. Keep the list of allowed sites short and trusted (exact
+  hosts, invited users only), keep Playwright and the image up to date, and set
   `CHROMIUM_SANDBOX=true` only on a host where Chromium's sandbox works.
+- **Errors** shown to users are short; storage and database details go only to Render's log.
 - **Reports** are downloaded through signed URLs that last an hour and are served as downloads.
 - **CORS** limits which websites may call the API from a browser; it is not authentication. Every
   call that reads or creates runs needs a valid Supabase access token.

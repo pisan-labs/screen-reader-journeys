@@ -28,7 +28,8 @@ services:
       - key: ALLOWED_ORIGINS
         sync: false
       # Sites the server may test, comma-separated: exact hosts, or "*." for subdomains, e.g.
-      # *.vercel.app,stem-accessibility.example.org. Empty allows nothing.
+      # stem-accessibility.example.org. Empty allows nothing. Prefer exact hosts: *.vercel.app
+      # would admit anyone's Vercel deployment.
       - key: ALLOWED_TARGET_HOSTS
         sync: false
       - key: RUN_TIMEOUT_SECONDS

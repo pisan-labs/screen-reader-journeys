@@ -29,6 +29,20 @@ function positiveNumber(env, name, fallback) {
 }
 
 /** Read and check the settings. Throws with every problem at once, so a misconfigured deploy fails at start-up. */
+/**
+ * RUN_AS_UID (and RUN_AS_GID, which defaults to the same number): the unprivileged user that runs
+ * each run's browser. Null when unset.
+ */
+function runAsUser(env) {
+  if (!env.RUN_AS_UID) return null;
+  const id = (name, value) => {
+    if (!/^\d+$/.test(value) || Number(value) === 0) throw new Error(`${name} must be the number of a user other than root`);
+    return Number(value);
+  };
+  const uid = id("RUN_AS_UID", env.RUN_AS_UID);
+  return { uid, gid: id("RUN_AS_GID", env.RUN_AS_GID ?? env.RUN_AS_UID) };
+}
+
 export function loadConfig(env = process.env) {
   const problems = [];
   const need = (name) => {
@@ -55,6 +69,8 @@ export function loadConfig(env = process.env) {
   config.runTimeoutMs = attempt(() => positiveNumber(env, "RUN_TIMEOUT_SECONDS", 900)) * 1000;
   config.pollIntervalMs = attempt(() => positiveNumber(env, "POLL_INTERVAL_SECONDS", 5)) * 1000;
   config.chromiumSandbox = /^(1|true|yes)$/i.test(env.CHROMIUM_SANDBOX ?? "");
+  config.runAs = attempt(() => runAsUser(env));
+  config.supabaseTimeoutMs = attempt(() => positiveNumber(env, "SUPABASE_TIMEOUT_SECONDS", 30)) * 1000;
   if (config.supabaseUrl && !/^https?:\/\//.test(config.supabaseUrl)) problems.push("SUPABASE_URL must start with https://");
   if (problems.length) throw new Error(`Configuration problems:\n- ${problems.join("\n- ")}`);
   return Object.freeze(config);

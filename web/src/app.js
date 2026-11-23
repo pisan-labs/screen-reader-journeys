@@ -151,8 +151,11 @@ function renderSignIn({ focus = true } = {}) {
     h("div", { class: "field" }, h("label", { for: "email" }, "Email address"), h("p", { id: "email-hint", class: "hint" }, "We email you a link. Open it in this browser to sign in."), email, error),
     h("div", {}, submit)
   );
+  let sending = false;
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
+    // aria-disabled keeps the button focusable while a link is sent, so ignore repeat presses here.
+    if (sending) return;
     clearError();
     const address = email.value.trim();
     if (!/^[^\s@]+@[^\s@]+$/.test(address)) {
@@ -164,10 +167,15 @@ function renderSignIn({ focus = true } = {}) {
     }
     error.textContent = "";
     email.removeAttribute("aria-invalid");
+    sending = true;
     submit.setAttribute("aria-disabled", "true");
     announce("Sending a sign-in link…");
-    const { error: failure } = await supabase.auth.signInWithOtp({ email: address, options: { emailRedirectTo: `${location.origin}${location.pathname}` } });
-    submit.removeAttribute("aria-disabled");
+    const { error: failure } = await supabase.auth
+      .signInWithOtp({ email: address, options: { emailRedirectTo: `${location.origin}${location.pathname}` } })
+      .finally(() => {
+        sending = false;
+        submit.removeAttribute("aria-disabled");
+      });
     if (failure) {
       announce("");
       showError(/signups? not allowed/i.test(failure.message) ? "This address has no account here. Ask the person who runs this service for an invitation." : `The sign-in link could not be sent: ${failure.message}`);

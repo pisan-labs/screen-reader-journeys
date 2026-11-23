@@ -14,7 +14,13 @@ COPY src ./src
 COPY server ./server
 COPY targets ./targets
 
-# The image's unprivileged user. Reports are written to the temp directory and deleted after upload.
-USER pwuser
+# The server starts as root only so that it can start each run as "runner", an unprivileged user
+# with no access to the server's environment (and so its Supabase keys), even if a tested page
+# breaks out of Chromium. Reports are written to a temp folder and deleted after upload.
+RUN groupadd --system --gid 10001 runner \
+ && useradd --system --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin runner
+ENV RUN_AS_UID=10001 \
+    RUN_AS_GID=10001
+USER root
 EXPOSE 10000
 CMD ["node", "server/index.js"]
