@@ -13,11 +13,15 @@
   },
   "scripts": {
     "test": "node --test test/*.test.js",
-    "srj": "node src/cli.js"
+    "test:sql": "bash test/sql/run.sh",
+    "srj": "node src/cli.js",
+    "start": "node server/index.js",
+    "server:dev": "node --env-file-if-exists=.env server/index.js"
   },
   "dependencies": {
     "@guidepup/guidepup": "0.40.0",
     "@guidepup/virtual-screen-reader": "0.33.0",
+    "@supabase/supabase-js": "2.118.0",
     "esbuild": "0.28.2",
     "playwright": "1.63.0"
   }
