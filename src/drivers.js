@@ -139,7 +139,13 @@ export function withoutKeyEcho(phrases, key) {
   const names = { enter: ["return", "enter"], space: ["space"], " ": ["space"], escape: ["escape", "esc"] };
   const parts = key.toLowerCase().split("+");
   const echoes = new Set([parts.join(" "), ...parts.flatMap((p) => names[p] ?? [p]), ...(names[parts.at(-1)] ?? []).map((n) => [...parts.slice(0, -1), n].join(" "))]);
-  return phrases.filter((phrase) => !echoes.has(phrase.trim().toLowerCase()));
+  return phrases
+    .map((phrase) => {
+      // Orca joins the echo onto the rest: "tab. Save. button".
+      const match = phrase.match(/^\s*([^.,]+)[.,]\s+(.*)$/s);
+      return match && echoes.has(match[1].trim().toLowerCase()) ? match[2] : phrase;
+    })
+    .filter((phrase) => !echoes.has(phrase.trim().toLowerCase()));
 }
 
 /** Shared parts of the real screen readers driven through Guidepup. */
