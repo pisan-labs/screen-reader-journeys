@@ -1,6 +1,7 @@
-node_modules/
+node_modules
 reports/
 .env
 web/dist/
+web/coverage/
 supabase/.temp/
 supabase/.branches/

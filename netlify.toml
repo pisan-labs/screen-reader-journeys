@@ -1,6 +1,7 @@
 # Netlify settings for the dashboard (web/). docs/deploy.md walks through the set-up.
-# Set VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY and VITE_API_URL in the site's environment
-# variables; the build fails without them.
+# The owner imports the repository once, with Deploy Previews and branch deploys off (every build
+# costs credits). Set VITE_API_URL, the Render service's address, in the site's environment
+# variables; the build fails without it.
 
 [build]
   base = "web"
@@ -8,8 +9,19 @@
   publish = "dist"
   command = "npm run build"
 
+# Public values only: the shared HintWise project and its anon key (claude-built-apps
+# platform/supabase.json), public by design. Never the service-role key: the build refuses it.
 [build.environment]
   NODE_VERSION = "22"
+  VITE_SUPABASE_URL = "https://auth.hintwise.org"
+  VITE_SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFya3R4bHJseWNlZmZ5b3pkd2hxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY4ODEwMTAsImV4cCI6MjA5MjQ1NzAxMH0.Vuku-irT3kAHZYibK23q6dpyOEqV_Eg5zB78I3dyshE"
+
+# One address for the app: the netlify.app name sends people to hintwise.org.
+[[redirects]]
+  from = "https://screen-reader-journeys.netlify.app/*"
+  to = "https://screen-reader-journeys.hintwise.org/:splat"
+  status = 301
+  force = true
 
 # Security headers for every response. The Content-Security-Policy is not here: the build writes
 # it to dist/_headers, because it names this deployment's Supabase project and API exactly.
@@ -23,8 +35,14 @@
     Cross-Origin-Opener-Policy = "same-origin"
     Strict-Transport-Security = "max-age=31536000"
 
-# The page and its config change with every deploy; let browsers check for new versions.
+# The page and hw-events.js change with deploys; let browsers check for new versions. Vite's
+# bundles in /assets/ carry a hash in their names, so they never change.
 [[headers]]
   for = "/*.js"
   [headers.values]
     Cache-Control = "public, max-age=0, must-revalidate"
+
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"

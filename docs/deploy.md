@@ -21,7 +21,7 @@ some journeys, and read the transcripts when the run finishes. It follows claude
 |---|---|---|
 | Supabase, the shared HintWise project (`https://auth.hintwise.org`) | Sign-in, and the schema `app_screen_reader_journeys`: `runs`, `run_results`, `run_reports` and `worker_config` | — |
 | Render, a service of its own | `server/index.js`: the API and, in the same process, the worker that runs journeys in walker and virtual modes | the public anon key, and `WORKER_TOKEN` |
-| Netlify | `web/`: the dashboard | the public anon key only |
+| Netlify | `web/`: the dashboard (Vite and TypeScript), with the platform's sign-in (Google or an emailed 6-digit code) and "Delete my account" | the public anon key only |
 
 **No service-role key anywhere.** The server refuses to start if `SUPABASE_SERVICE_ROLE_KEY` is
 set.
@@ -127,15 +127,23 @@ shared with other apps). It needs a service of its own, built from this reposito
 directory `dist`. The owner imports the repository once, with Deploy Previews and branch deploys
 turned off, because every build costs credits. Docs-only commits carry `[skip netlify]`.
 
-| Variable | Value |
-|---|---|
-| `VITE_SUPABASE_URL` | `https://auth.hintwise.org` |
-| `VITE_SUPABASE_ANON_KEY` | the public anon key. The build refuses a service-role key |
-| `VITE_API_URL` | the Render service's address, without a trailing slash |
+| Variable | Value | Where |
+|---|---|---|
+| `VITE_SUPABASE_URL` | `https://auth.hintwise.org` | `netlify.toml` |
+| `VITE_SUPABASE_ANON_KEY` | the public anon key. The build refuses a service-role key | `netlify.toml` |
+| `VITE_API_URL` | the Render service's address, without a trailing slash | the site's environment variables |
 
-The build writes these values to `config.js`. It also writes to `_headers` a
-Content-Security-Policy that allows exactly those two origins. `netlify.toml` adds the other
-security headers.
+- **The build:** `tsc` and `vite build`.
+- **The Content-Security-Policy** goes in `_headers`. It allows exactly the Supabase URL and the
+  API, Cloudflare Turnstile (which sign-in may ask for), and the page's inline styles by hash:
+  the HintWise footer's, the sign-in panel's and the Google G's.
+- **`licenses.txt`:** the bundled packages and their licences.
+- **The other security headers** are in `netlify.toml`, which also sends
+  `screen-reader-journeys.netlify.app` to the hintwise.org address.
+
+The page carries the HintWise footer byte for byte, the HintWise favicon and `hw-events.js`, the
+platform's cookieless visit counter. Its privacy note says what is stored. The tests in
+`web/test/hintwise.test.ts` pin all of these.
 
 ## 5. Smoke test
 
@@ -161,7 +169,11 @@ Then in the dashboard:
 - **`npm test`** covers:
   - the server: the allowlist, validation, the API, and the worker against local fixture sites,
     with a fake Supabase client that models the `worker_*` functions;
-  - the dashboard, walked with this tool.
+  - the dashboard, built with Vite and walked by keyboard with this tool, including the
+    emailed-code sign-in, under its own Content-Security-Policy and at 375 px. It needs
+    `npm ci --prefix web` first.
+- **The dashboard's own gates** (`web/`): `npm run lint`, `npm run typecheck`, `npm run coverage`
+  (at least 85%, under jsdom with fakes) and `npm run build`.
 - **`npm run test:sql`** applies the migrations twice to a throwaway local PostgreSQL, on a stub of
   Supabase's roles and `auth`. It needs `initdb`, `pg_ctl` and `psql`. It checks the grants, row
   level security, the per-person limit, the token check, each worker function, account deletion,
@@ -174,8 +186,8 @@ which needs Docker):
 2. Pin a local token's hash with `psql`, as `supabase/ops/worker-token.sql` does.
 3. Fill in `.env` from `.env.example`, with that token as `WORKER_TOKEN`.
 
-Sign-in in the dashboard returns only to `https://*.hintwise.org`, so local runs use the API with a
-token from the local stack.
+Sign-in returns only to `https://*.hintwise.org`, so a local dashboard (`cd web && npm run dev`)
+cannot complete a real sign-in. Use the API with a token from the local stack instead.
 
 ## Which sites the server will test
 
@@ -227,7 +239,7 @@ domain only you control, where you can.
   - A leaked `WORKER_TOKEN` lets its holder claim, fill in, finish or requeue runs. It cannot read
     anyone's runs, results or reports.
   - The run process that drives the browser gets only a short list of harmless variables (`PATH`,
-    `HOME` and `PLAYWRIGHT_BROWSERS_PATH`). It runs as `runner`, an unprivileged user, while the
+    `HOME`, `TMPDIR`, the locale and time zone, `NODE_ENV` and `PLAYWRIGHT_BROWSERS_PATH`). It runs as `runner`, an unprivileged user, while the
     server runs as root. So even a page that breaks out of Chromium cannot read the server's
     environment through `/proc`.
 - **Network guard.** Pages under test are untrusted, and their scripts run in the server's

@@ -13,3 +13,7 @@ Append-only journal, oldest first. Earlier history: `git log` and `docs/handoff.
 2026-11-23 [decision] Owner: the worker gets its own Render service, free plan to start; TypeScript for the dashboard, tsc --checkJs for server and CLI; no relay scheduled tasks for this session.
 
 2026-11-23 [code] Runs move to schema app_screen_reader_journeys (0001_runs.sql); the worker uses token-checked worker_* functions, no service-role key; reports move from Storage to run_reports.
+
+2026-11-23 [code] Dashboard moves to Vite and TypeScript with the platform's sign-in (Google, emailed code), Delete my account, the HintWise footer, favicon, hw-events.js and a privacy note.
+
+2026-11-23 [code] The tool now follows focus into open shadow roots; it reported the HintWise footer's host element instead of its links.

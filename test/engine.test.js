@@ -61,3 +61,18 @@ describe("virtual mode", () => {
     assert.match(heard, /Saved\./);
   });
 });
+
+describe("focus inside an open shadow root", () => {
+  for (const mode of ["walker", "virtual"]) {
+    it(`names the focused element, not its shadow host (${mode})`, async () => {
+      const result = await runJourney(await loadJourney(`${fixtures}shadow.journey.js`), { mode, baseUrl: site.url });
+      const stops = result.steps.filter((s) => s.focus).map((s) => s.focus.selector);
+      assert.ok(stops.includes("a"), JSON.stringify(stops));
+      assert.ok(!stops.includes("site-footer"), `the shadow host was reported as the focus: ${JSON.stringify(stops)}`);
+      if (mode === "walker") assert.ok(result.steps.flatMap((s) => s.spoken).includes("Send an idea, link"), JSON.stringify(result.steps.map((s) => s.spoken)));
+      const hidden = result.findings.filter((f) => f.rule === "focus-in-aria-hidden");
+      assert.equal(hidden.length, 1, "the link under aria-hidden inside the shadow root is found");
+      assert.ok(!result.findings.some((f) => f.rule === "no-name" && !/hidden/.test(f.element ?? "")), JSON.stringify(result.findings));
+    });
+  }
+});

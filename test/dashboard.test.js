@@ -1,6 +1,7 @@
-// The dashboard (web/), checked with this tool itself: build it with web/build.mjs, serve it,
-// answer Supabase and the API inside the browser, and walk it by keyboard. Also loads it under
-// its own Content-Security-Policy, which runJourney bypasses.
+// The dashboard (web/), checked with this tool itself: build it with Vite (web/ must have its
+// node_modules: npm ci --prefix web), serve it, answer Supabase, the platform's sign-in and the
+// API inside the browser, and walk it by keyboard. Also loads it under its own
+// Content-Security-Policy, which runJourney bypasses.
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { readFile, mkdtemp, rm } from "node:fs/promises";
@@ -13,7 +14,8 @@ import { promisify } from "node:util";
 import { chromium } from "playwright";
 import { runJourney } from "../src/journey.js";
 
-const SUPABASE = "https://test-project.supabase.co";
+// As in production: the shared HintWise project, which also takes the analytics events.
+const SUPABASE = "https://auth.hintwise.org";
 const API = "https://api.srj.test";
 const USER = { id: "00000000-0000-4000-8000-00000000000a", aud: "authenticated", role: "authenticated", email: "reviewer@example.org" };
 const RUN_ID = "3f2a1c9e-8b7d-4e6f-9a0b-1c2d3e4f5a6b";
@@ -33,14 +35,16 @@ let csp;
 
 before(async () => {
   out = await mkdtemp(join(tmpdir(), "srj-web-"));
-  await promisify(execFile)(process.execPath, [fileURLToPath(new URL("../web/build.mjs", import.meta.url))], {
-    env: { ...process.env, WEB_OUT_DIR: out, VITE_SUPABASE_URL: SUPABASE, VITE_SUPABASE_ANON_KEY: "anon-key", VITE_API_URL: API },
+  const web = fileURLToPath(new URL("../web/", import.meta.url));
+  await promisify(execFile)(process.execPath, [join(web, "node_modules/vite/bin/vite.js"), "build", "--outDir", out, "--emptyOutDir", "--logLevel", "error"], {
+    cwd: web,
+    env: { ...process.env, VITE_SUPABASE_URL: SUPABASE, VITE_SUPABASE_ANON_KEY: "anon-key", VITE_API_URL: API },
   });
   csp = /Content-Security-Policy: (.*)/.exec(await readFile(join(out, "_headers"), "utf8"))[1];
-  const types = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css" };
+  const types = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css", ".txt": "text/plain; charset=utf-8" };
   const server = createServer(async (req, res) => {
     const name = new URL(req.url, "http://x").pathname.slice(1) || "index.html";
-    if (!/^[a-z]+\.(html|js|css)$/.test(name)) return res.writeHead(404).end();
+    if (!/^(assets\/)?[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*\.(html|js|css|txt)$/.test(name)) return res.writeHead(404).end();
     try {
       res.writeHead(200, { "Content-Type": types[extname(name)], "Content-Security-Policy": csp }).end(await readFile(join(out, name)));
     } catch {
@@ -59,7 +63,7 @@ after(async () => {
 async function fakeBackend(page, { signedIn, posted = [] }) {
   if (signedIn) {
     const session = { access_token: "header.payload.signature", refresh_token: "refresh", token_type: "bearer", expires_in: 3600, expires_at: Math.floor(Date.now() / 1000) + 3600, user: USER };
-    await page.addInitScript(([key, value]) => localStorage.setItem(key, value), ["sb-test-project-auth-token", JSON.stringify(session)]);
+    await page.addInitScript(([key, value]) => localStorage.setItem(key, value), ["sb-auth-auth-token", JSON.stringify(session)]);
   }
   const cors = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "*", "Access-Control-Allow-Methods": "GET, POST, OPTIONS" };
   const json = (route, body, status = 200) => route.fulfill({ status, contentType: "application/json", headers: cors, body: JSON.stringify(body) });
@@ -81,7 +85,10 @@ async function fakeBackend(page, { signedIn, posted = [] }) {
     const request = route.request();
     if (request.method() === "OPTIONS") return route.fulfill({ status: 204, headers: cors });
     const { pathname } = new URL(request.url());
-    if (pathname === "/auth/v1/otp") return json(route, {});
+    // The platform's sign-in function (src/lib/auth.ts sendMagicLink) and the analytics events.
+    if (pathname === "/functions/v1/sign-in-link") return json(route, { status: "sent", withCode: true });
+    if (pathname === "/functions/v1/app-events") return route.fulfill({ status: 204, headers: cors });
+    if (pathname === "/rest/v1/rpc/ensure_profile") return json(route, null);
     if (pathname === "/auth/v1/user") return json(route, USER);
     if (pathname === "/auth/v1/logout") return route.fulfill({ status: 204, headers: cors });
     // The app's own schema, as supabase-js asks for it.
@@ -111,20 +118,24 @@ async function fakeBackend(page, { signedIn, posted = [] }) {
 }
 
 const signIn = {
-  name: "Dashboard: sign in",
+  name: "Dashboard: sign in with an emailed code",
   start: "/index.html",
-  ready: "#email",
+  ready: "button.hw-signin-google",
   setup: (page) => fakeBackend(page, { signedIn: false }),
   async run(sr) {
     await sr.tabTo({ role: "link", name: "Skip to main content" }, { max: 1 });
-    await sr.tabTo({ role: "button", name: "Send sign-in link" });
+    await sr.tabTo({ role: "button", name: "Sign in with Google" });
+    await sr.tabTo({ role: "button", name: "Email code" });
     await sr.activate();
-    await sr.expectAnnouncement(/Enter an email address/);
-    await sr.expectFocus({ role: "textbox", name: "Email address" });
+    // The panel opens with the focus in its email box.
+    await sr.expectFocus({ role: "textbox", name: "Email for a sign-in code" });
     await sr.page.keyboard.type("reviewer@example.org");
-    await sr.tabTo({ role: "button", name: "Send sign-in link" });
+    await sr.tabTo({ role: "button", name: "Email me a sign-in code" });
     await sr.activate();
-    await sr.expectAnnouncement(/Check your email: we sent a sign-in link to reviewer@example\.org/);
+    await sr.expectAnnouncement(/We sent a 6-digit code to reviewer@example\.org/);
+    // The focus moves to the code box, which names what was sent.
+    await sr.expectFocus({ role: "textbox", name: /Sign-in code/ });
+    await sr.tabTo({ role: "button", name: "Sign in" }, { max: 1 });
   },
 };
 
@@ -161,7 +172,7 @@ function assertAccessible(result) {
 
 describe("dashboard accessibility", () => {
   for (const mode of ["walker", "virtual"]) {
-    it(`signs in by keyboard, hearing the errors and the result (${mode})`, async () => {
+    it(`signs in with an emailed code by keyboard, hearing what was sent (${mode})`, async () => {
       assertAccessible(await runJourney({ ...signIn, file: "test/dashboard.test.js" }, { mode, baseUrl: site.url }));
     });
   }
@@ -172,15 +183,15 @@ describe("dashboard accessibility", () => {
     assert.deepEqual(posted, [{ base_url: "https://preview.vercel.app", journeys: [HOME], modes: ["walker", "virtual"] }]);
     const heard = result.steps.flatMap((s) => s.spoken).join(" / ");
     assert.match(heard, /Skip to main content, link/);
-    assert.match(heard, /Sign out, button/);
+    assert.match(heard, /reviewer@example\.org/);
     assert.match(heard, /Site address, textbox/);
   });
 });
 
 describe("dashboard under its Content-Security-Policy", () => {
-  it("allows exactly the configured Supabase project and API", () => {
+  it("allows exactly the configured Supabase project and API, and the sign-in check", () => {
     assert.match(csp, /default-src 'none'/);
-    assert.match(csp, /script-src 'self'(;|$)/);
+    assert.match(csp, /script-src 'self' https:\/\/challenges\.cloudflare\.com(;|$)/);
     assert.match(csp, new RegExp(`connect-src 'self' ${SUPABASE} ${API}(;|$)`));
     assert.match(csp, /frame-ancestors 'none'/);
   });
@@ -197,6 +208,26 @@ describe("dashboard under its Content-Security-Policy", () => {
       await page.getByRole("heading", { name: "Runs", level: 1 }).waitFor();
       await page.getByText("You have not started any runs yet.").waitFor();
       assert.deepEqual(violations, []);
+    } finally {
+      await browser.close();
+    }
+  });
+});
+
+describe("dashboard on a phone", () => {
+  it("does not scroll sideways at 375 px, signed out, on the runs page or on a run", async () => {
+    const browser = await chromium.launch();
+    try {
+      const widths = {};
+      for (const [name, signedIn, hash] of [["signed out", false, ""], ["runs", true, ""], ["run", true, `#/runs/${RUN_ID}`]]) {
+        const page = await browser.newPage({ viewport: { width: 375, height: 800 } });
+        await fakeBackend(page, { signedIn, posted: [] });
+        await page.goto(`${site.url}/index.html${hash}`);
+        await page.locator(hash ? "h1:has-text('Run on')" : signedIn ? "#base-url" : "button.hw-signin-google").waitFor();
+        widths[name] = await page.evaluate(() => document.documentElement.scrollWidth);
+        await page.close();
+      }
+      assert.deepEqual(widths, { "signed out": 375, runs: 375, run: 375 });
     } finally {
       await browser.close();
     }

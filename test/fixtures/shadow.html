@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8" /><title>Shadow DOM test page</title></head>
+  <body>
+    <main><h1>Shadow DOM test page</h1><a href="#top">Before the footer</a></main>
+    <site-footer><template shadowrootmode="open"><style>a:focus { outline: 2px solid; }</style><aside aria-label="Built by"><a href="#ideas">Send an idea</a><span aria-hidden="true"><a href="#hidden">Hidden inside</a></span></aside></template></site-footer>
+  </body>
+</html>

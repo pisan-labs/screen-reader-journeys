@@ -184,7 +184,9 @@ The hosted service is these parts, and only these:
   in Chromium. It tests only the sites listed in `ALLOWED_TARGET_HOSTS`, and only the journeys in
   its own `targets/`. The worker reaches the database only through token-checked functions; there
   is no service-role key.
-- **Netlify** (`netlify.toml`, `web/`): the dashboard.
+- **Netlify** (`netlify.toml`, `web/`): the dashboard, in Vite and TypeScript, with the HintWise
+  sign-in (Google or an emailed 6-digit code), "Delete my account", the HintWise footer and the
+  platform's cookieless visit counter.
 
 The command-line tool (`src/`, `targets/`) and its GitHub workflows are not part of it. They hold
 no service-role key and no Anthropic key.
