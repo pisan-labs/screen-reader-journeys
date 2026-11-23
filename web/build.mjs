@@ -15,8 +15,8 @@
 // WEB_OUT_DIR builds somewhere other than dist/ (the tests use it).
 
 import { context } from "esbuild";
-import { copyFile, mkdir, rm, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { copyFile, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const dir = (path) => fileURLToPath(new URL(path, import.meta.url));
@@ -70,11 +70,28 @@ const csp = [
   "frame-ancestors 'none'",
 ].join("; ");
 
-async function copyStatic() {
+/** The licences of the npm packages bundled into app.js (supabase-js and its dependencies), for licenses.txt. */
+async function licenses(metafile) {
+  const packages = new Map();
+  for (const input of Object.keys(metafile?.inputs ?? {})) {
+    const match = /^(.*node_modules\/((?:@[^/]+\/)?[^/]+))\//.exec(input);
+    if (match) packages.set(match[2], resolve(match[1]));
+  }
+  const parts = [];
+  for (const [name, root] of [...packages].sort()) {
+    const { version, license } = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
+    const file = (await readdir(root)).find((f) => /^(licen[cs]e|copying)/i.test(f));
+    parts.push(`${name} ${version} (${license})\n\n${file ? (await readFile(join(root, file), "utf8")).trim() : "No licence file in the package."}`);
+  }
+  return `Third-party code bundled into app.js:\n\n${parts.join(`\n\n${"-".repeat(72)}\n\n`)}\n`;
+}
+
+async function copyStatic(result) {
   await copyFile(dir("src/index.html"), `${dist}index.html`);
   await copyFile(dir("src/styles.css"), `${dist}styles.css`);
   await writeFile(`${dist}config.js`, `window.SRJ_CONFIG = ${JSON.stringify(config)};\n`);
   await writeFile(`${dist}_headers`, `/*\n  Content-Security-Policy: ${csp}\n`);
+  if (result?.metafile) await writeFile(`${dist}licenses.txt`, await licenses(result.metafile));
 }
 
 // Start dist/ afresh; a WEB_OUT_DIR is only written into, never emptied.
@@ -89,6 +106,7 @@ const ctx = await context({
   minify: !serve,
   sourcemap: serve,
   logLevel: "info",
+  metafile: true,
   plugins: [{ name: "static", setup: (build) => build.onEnd(copyStatic) }],
 });
 if (serve) {

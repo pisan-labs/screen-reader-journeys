@@ -31,5 +31,13 @@ SOFTWARE.
 
 Installed from npm, not copied: [@guidepup/guidepup](https://github.com/guidepup/guidepup) (MIT),
 [@guidepup/virtual-screen-reader](https://github.com/guidepup/virtual-screen-reader) (MIT),
-[Playwright](https://github.com/microsoft/playwright) (Apache-2.0) and
-[esbuild](https://github.com/evanw/esbuild) (MIT).
+[Playwright](https://github.com/microsoft/playwright) (Apache-2.0),
+[esbuild](https://github.com/evanw/esbuild) (MIT) and
+[supabase-js](https://github.com/supabase/supabase-js) (MIT).
+
+The dashboard's build (`web/build.mjs`) bundles supabase-js and its dependencies into
+`app.js`, and writes their licences next to it as `licenses.txt`.
+
+The server's Docker image is built on the
+[official Playwright image](https://mcr.microsoft.com/en-us/artifact/mar/playwright/), which
+contains Ubuntu, Node.js and browsers under their own licences.

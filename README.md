@@ -114,6 +114,21 @@ Chromium reports: `button`, `link`, `combobox`, `checkbox`, `heading` and so on.
 - **VoiceOver** (`.github/workflows/voiceover.yml`): the same with real VoiceOver, on a Mac
   registered as a self-hosted runner. See [docs/voiceover.md](docs/voiceover.md).
 
+## As a hosted service
+
+The tool can also run as a service with a dashboard: people sign in with an emailed link, choose
+a site and journeys, and download the reports when the run finishes. It runs the `walker` and
+`virtual` modes only.
+
+- **Supabase** (`supabase/`): sign-in, the runs and their results, and the reports bucket.
+- **Render** (`render.yaml`, `Dockerfile`, `server/`): the API and the worker that runs journeys
+  in Chromium. It tests only the sites listed in `ALLOWED_TARGET_HOSTS`, and only the journeys in
+  its own `targets/`.
+- **Netlify** (`netlify.toml`, `web/`): the dashboard.
+
+[docs/deploy.md](docs/deploy.md) walks through setting up all three, testing the deployment, and
+running everything locally. `.env.example` lists every setting.
+
 ## What the automatic findings mean
 
 | Rule | Level | Meaning |
