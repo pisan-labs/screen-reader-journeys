@@ -2,13 +2,13 @@
 // results. One run at a time. `db` is workerDb() from worker-db.js: the token-checked worker_*
 // functions, and nothing else (or a fake with the same methods, in the tests).
 
-import { chown, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { chmod, chown, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 import { findJourney } from "./catalog.js";
 import { executeRun } from "./execute.js";
 import { resolveEgress } from "./hosts.js";
-import { listReportFiles, readReportFile, stopUserProcesses } from "./reports.js";
+import { checkReportsFolder, listReportFiles, readReportFile, recordReportsFolder, stopUserProcesses } from "./reports.js";
 import { validateRunRequest } from "./validate.js";
 
 /** A report larger than this is left out (the database refuses it); the summary says so. */
@@ -59,7 +59,7 @@ export function summarizeRun({ results, blocked, outcome }, files, skipped = [])
   };
 }
 
-export function createWorker({ db, catalog, config, execute = executeRun, lookup, log = console, stopProcesses = (uid) => stopUserProcesses(uid) }) {
+export function createWorker({ db, catalog, config, execute = executeRun, lookup, log = console, stopProcesses = (runAs) => stopUserProcesses(runAs.uid, { gid: runAs.gid }) }) {
   let stopping = false;
   let loop = null;
   let current = null; // AbortController of the run in progress
@@ -74,7 +74,7 @@ export function createWorker({ db, catalog, config, execute = executeRun, lookup
 
   /** With RUN_AS_UID, end every process of that user: nothing of a run may outlive it. */
   async function stopRunProcesses() {
-    if (config.runAs) await stopProcesses(config.runAs.uid);
+    if (config.runAs) await stopProcesses(config.runAs);
   }
 
   /**
@@ -86,7 +86,7 @@ export function createWorker({ db, catalog, config, execute = executeRun, lookup
    * opened without following links, its size checked on the open handle and read no further
    * than the limit. Its name is checked before it is sent.
    */
-  async function saveReports(runId, dir) {
+  async function saveReports(runId, dir, { realRoot, uid }) {
     const saved = [];
     const skipped = [];
     const leaveOut = (file, why) => {
@@ -105,7 +105,7 @@ export function createWorker({ db, catalog, config, execute = executeRun, lookup
         leaveOut(file, "a name the database does not take");
         continue;
       }
-      const read = await readReportFile(dir, file, MAX_REPORT_BYTES);
+      const read = await readReportFile(dir, file, MAX_REPORT_BYTES, { realRoot, uid });
       if ("refused" in read) {
         leaveOut(file, read.refused);
         continue;
@@ -151,13 +151,18 @@ export function createWorker({ db, catalog, config, execute = executeRun, lookup
    * With `runAs`, both belong to that user, the only one the run process can write as.
    */
   async function makeWorkDir() {
+    // The work folder stays the server's, so the run cannot rename or replace reports/ or home/
+    // inside it; only those two are the run user's. 0755 lets that user reach them.
     const workDir = await mkdtemp(join(tmpdir(), "srj-run-"));
     const outDir = join(workDir, "reports");
     const home = join(workDir, "home");
     await mkdir(outDir);
     await mkdir(home);
-    if (config.runAs) for (const dir of [workDir, outDir, home]) await chown(dir, config.runAs.uid, config.runAs.gid);
-    return { workDir, outDir, home };
+    if (config.runAs) {
+      await chmod(workDir, 0o755);
+      for (const dir of [outDir, home]) await chown(dir, config.runAs.uid, config.runAs.gid);
+    }
+    return { workDir, outDir, home, reports: await recordReportsFolder(outDir) };
   }
 
   /** Run one claimed run to the end. Never throws for a problem with the run itself. */
@@ -196,9 +201,10 @@ export function createWorker({ db, catalog, config, execute = executeRun, lookup
         log.log(`run ${run.id}: requeued`);
         return;
       }
-      // Nothing may write into the folder while it is read.
+      // Nothing may write into the folder while it is read, and it must be the folder made for it.
       await stopRunProcesses();
-      const { saved: files, skipped } = await saveReports(run.id, outDir);
+      await checkReportsFolder(dirs.reports);
+      const { saved: files, skipped } = await saveReports(run.id, outDir, { realRoot: dirs.reports.real, uid: dirs.reports.uid });
       await recordResults(run.id, outcome.results, files);
       const summary = summarizeRun(outcome, files, skipped);
       const expected = job.journeys.length * job.modes.length;
@@ -216,7 +222,9 @@ export function createWorker({ db, catalog, config, execute = executeRun, lookup
       );
     } finally {
       current = null;
-      if (workDir) await rm(workDir, { recursive: true, force: true });
+      // On every path (done, failed, aborted for a deploy): nothing of this run may outlive it.
+      await stopRunProcesses().catch((error) => log.error(`run ${run.id}: stopping its processes: ${error.message}`));
+      if (workDir) await rm(workDir, { recursive: true, force: true }).catch((error) => log.error(`run ${run.id}: removing its folder: ${error.message}`));
     }
   }
 

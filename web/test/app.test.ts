@@ -395,24 +395,41 @@ describe('the dashboard', () => {
 
   it('stops polling a run when the person signs out, even with an answer still on its way (R2.6)', async () => {
     let release: () => void = () => {};
+    let answered: () => void = () => {};
+    const heldAnswerRead = new Promise<void>((resolve) => (answered = resolve));
     const { fetch, signIn } = await setup({
       hash: `#/runs/${RUN_ID}`,
       answers: { [`GET /runs/${RUN_ID}`]: { status: 200, body: { run: run({ status: 'running', summary: null, run_results: [] }) } } },
     });
     const reads = () => fetch.mock.calls.filter(([url]) => String(url).endsWith(`/runs/${RUN_ID}`)).length;
-    // Hold the next answer until after the sign-out.
+    // Hold the next answer until after the sign-out, and know when the page has read it.
     const original = fetch.getMockImplementation()!;
     fetch.mockImplementation(async (url, init) => {
-      if (String(url).endsWith(`/runs/${RUN_ID}`)) await new Promise<void>((resolve) => (release = resolve));
-      return original(url, init);
+      if (!String(url).endsWith(`/runs/${RUN_ID}`)) return original(url, init);
+      await new Promise<void>((resolve) => (release = resolve));
+      const response = await original(url, init);
+      const json = response.json.bind(response);
+      response.json = async () => {
+        const body = await json();
+        answered();
+        return body;
+      };
+      return response;
     });
     await until(() => reads() === 2, 'the second poll');
     signIn(null);
     await until(() => view().textContent!.includes('Sign in at the top'), 'the signed-out view');
+    // From here, a poll would show as a timer for refresh: count every timer the page sets.
+    const timers = vi.spyOn(globalThis, 'setTimeout');
     release();
-    await tick(30);
+    await heldAnswerRead;
+    // Let the page finish with that answer: everything queued before this macrotask runs first.
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(timers.mock.calls.filter(([, ms]) => ms === 5 || ms === 10)).toEqual([]);
     expect(reads()).toBe(2);
     expect(view().textContent).toMatch(/Sign in at the top/);
+    timers.mockRestore();
   });
 
   it('shows a failed run, and one with no results', async () => {
