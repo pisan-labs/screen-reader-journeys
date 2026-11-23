@@ -116,6 +116,7 @@ class Session {
    * switches, Enter otherwise. With `expectDownload` (true, a string or a RegExp for the file
    * name), waits for the download and checks its name.
    */
+  /** @param {{ expectDownload?: boolean | string | RegExp }} [options] */
   async activate({ expectDownload } = {}) {
     const role = this.driver.lastFocus?.role;
     const key = ["checkbox", "radio", "switch"].includes(role) ? "Space" : "Enter";
@@ -200,6 +201,10 @@ class Session {
  * Run one journey in one mode. `baseUrl` is the site under test, e.g. a pull request's preview.
  * `launchOptions` go to Playwright's browser launch (the hosted server uses them for its network
  * guard proxy).
+ */
+/**
+ * @param {any} journey
+ * @param {{ mode: string, baseUrl: string, headed?: boolean, launchOptions?: { args?: string[], [key: string]: any } }} options
  */
 export async function runJourney(journey, { mode, baseUrl, headed = false, launchOptions = {} }) {
   const Driver = DRIVERS[mode];

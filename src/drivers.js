@@ -64,6 +64,7 @@ class WalkerDriver {
     return { focus, spoken };
   }
 
+  /** @returns {Promise<{ spoken: string[], unsupported?: string }>} */
   async next() {
     return { spoken: [], unsupported: "Reading line by line needs the virtual or voiceover mode." };
   }
@@ -154,6 +155,8 @@ class GuidepupDriver {
 
   constructor(page) {
     this.page = page;
+    /** The Guidepup screen reader, set by start(). @type {any} */
+    this.sr = null;
   }
 
   /** Called before the browser starts (Orca must be running first so Chromium joins its accessibility bus). */

@@ -202,8 +202,12 @@ Then in the dashboard:
   - the dashboard, built with Vite and walked by keyboard with this tool, including the
     emailed-code sign-in, under its own Content-Security-Policy and at 375 px. It needs
     `npm ci --prefix web` first.
-- **The dashboard's own gates** (`web/`): `npm run lint`, `npm run typecheck`, `npm run coverage`
-  (at least 85%, under jsdom with fakes) and `npm run build`.
+- **The gates before every push**, which CI runs too:
+  - at the root, for the server and the tool: `npm run lint`, `npm run typecheck` (tsc checking
+    the JavaScript from its JSDoc) and `npm run coverage` (every test, failing if `server/` falls
+    under 85% of lines, branches or functions);
+  - in `web/`, for the dashboard: `npm run lint`, `npm run typecheck`, `npm run coverage` (at
+    least 85%, under jsdom with fakes) and `npm run build`.
 - **`npm run test:sql`** applies the migrations twice to a throwaway local PostgreSQL, on a stub of
   Supabase's roles and `auth`. It needs `initdb`, `pg_ctl` and `psql`. It checks the grants, row
   level security, the per-person limit, the token check, each worker function, account deletion,

@@ -43,18 +43,39 @@ function runAsUser(env) {
   return { uid, gid: id("RUN_AS_GID", env.RUN_AS_GID ?? env.RUN_AS_UID) };
 }
 
+/**
+ * @typedef {object} Config
+ * @property {string} supabaseUrl
+ * @property {string} supabaseAnonKey
+ * @property {string} workerToken
+ * @property {string[]} allowedOrigins
+ * @property {string} allowedTargetHosts
+ * @property {any[]} targetRules
+ * @property {number} port
+ * @property {number} runTimeoutMs
+ * @property {number} pollIntervalMs
+ * @property {boolean} chromiumSandbox
+ * @property {{ uid: number, gid: number } | null} runAs
+ * @property {number} supabaseTimeoutMs
+ */
+
+/**
+ * @param {Record<string, string | undefined>} [env]
+ * @returns {Readonly<Config>}
+ */
 export function loadConfig(env = process.env) {
   const problems = [];
   const need = (name) => {
     if (blank(env[name])) problems.push(`${name} is not set`);
     return env[name]?.trim();
   };
-  const config = {
+  /** @type {Config} */
+  const config = /** @type {any} */ ({
     supabaseUrl: need("SUPABASE_URL"),
     supabaseAnonKey: need("SUPABASE_ANON_KEY"),
     // The worker's proof to the worker_* functions; the database keeps only its SHA-256.
     workerToken: need("WORKER_TOKEN"),
-  };
+  });
   // Printable ASCII only, so the server and the database count it the same way, and stray
   // whitespace or a pasted newline is caught here rather than as "Bad worker token." later.
   if (config.workerToken && !/^[\x21-\x7e]{32,200}$/.test(config.workerToken)) {

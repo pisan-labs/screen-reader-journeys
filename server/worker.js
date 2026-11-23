@@ -59,6 +59,17 @@ export function summarizeRun({ results, blocked, outcome }, files, skipped = [])
   };
 }
 
+/**
+ * @param {{
+ *   db: ReturnType<typeof import("./worker-db.js").workerDb>,
+ *   catalog: readonly any[],
+ *   config: any,
+ *   execute?: typeof executeRun,
+ *   lookup?: (host: string) => Promise<string[]>,
+ *   log?: Pick<Console, "log" | "error">,
+ *   stopProcesses?: (uid: number) => Promise<void>,
+ * }} options
+ */
 export function createWorker({ db, catalog, config, execute = executeRun, lookup, log = console, stopProcesses = (uid) => stopUserProcesses(uid) }) {
   let stopping = false;
   let loop = null;
