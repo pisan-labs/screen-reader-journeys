@@ -38,14 +38,28 @@ npx playwright install chromium
 node src/cli.js run targets/stem-accessibility --base-url https://frontend-git-<branch>-stem-accessibility.vercel.app
 ```
 
-The reports go to `reports/`. `summary.md` links one Markdown report per journey and mode (with
-a JSON copy). Each report has the checks, the findings and the transcript. The exit code is 1 if
-a journey failed.
+The reports go to `reports/`. Each journey and mode gets a report with the checks, the findings
+and the transcript. The exit code is 1 if a journey failed.
 
 ```
-srj run [paths...] --base-url URL [--mode walker,virtual] [--out reports] [--headed] [--fail-on error|warning|none]
+srj run [paths...] --base-url URL [--mode walker,virtual] [--format md,json,html] [--out reports] [--headed] [--fail-on error|warning|none]
 srj list [paths...]
 ```
+
+## Report formats
+
+Choose with `--format` (comma-separated; the default is `md,json,html`):
+
+| Format | Files | For |
+|---|---|---|
+| `md` | `<journey>.<mode>.md`, `summary.md` | Reading in a pull request or on GitHub |
+| `json` | `<journey>.<mode>.json` | Other tools; the complete result |
+| `html` | `<journey>.<mode>.html`, `summary.html` | Reading in a browser. Self-contained, accessible (no axe violations, light and dark) |
+| `junit` | `junit.xml` | CI test reports (GitHub, GitLab, Jenkins). Each check is a test case; error findings fail |
+| `sarif` | `results.sarif` | SARIF 2.1.0 viewers. Results point at the page URL, since a rendered page has no source file |
+| `csv` | `findings.csv`, `checks.csv` | Spreadsheets. Cells that would start a formula are prefixed with `'` |
+
+Page text is untrusted, so every format escapes it.
 
 Paths are `*.journey.js` files, or folders to search; the default is `targets/`. `--fail-on
 error` also fails the run when a finding is an error, not only when a journey's checks fail.

@@ -1,14 +1,19 @@
-// Markdown and JSON reports: a transcript of what was heard, the checks, and the findings.
+// Reports: a transcript of what was heard, the checks, and the findings. Markdown and JSON here;
+// HTML, JUnit, SARIF and CSV in formats.js.
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { slug } from "./slug.js";
+import { renderChecksCsv, renderFindingsCsv, renderJourneyHtml, renderJunit, renderSarif, renderSummaryHtml } from "./formats.js";
+
+export { slug };
+
+/** Report formats `writeReports` can write. */
+export const FORMATS = ["md", "json", "html", "junit", "sarif", "csv"];
+export const DEFAULT_FORMATS = ["md", "json", "html"];
 
 const cell = (text) => String(text ?? "").replace(/\|/g, "\\|").replace(/\n/g, " ");
 const ICON = { pass: "✅ pass", fail: "❌ fail", error: "⚠️ error" };
-
-export function slug(text) {
-  return text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "journey";
-}
 
 export function renderJourney(result) {
   const failed = result.expectations.filter((e) => !e.ok).length;
@@ -89,12 +94,39 @@ export function renderSummary(results) {
   ].join("\n");
 }
 
-export async function writeReports(results, outDir) {
+/**
+ * Write the chosen formats into `outDir`:
+ *   md     <journey>.<mode>.md and summary.md
+ *   json   <journey>.<mode>.json
+ *   html   <journey>.<mode>.html and summary.html
+ *   junit  junit.xml
+ *   sarif  results.sarif
+ *   csv    findings.csv and checks.csv
+ * Returns the paths written.
+ */
+export async function writeReports(results, outDir, { formats = DEFAULT_FORMATS } = {}) {
+  const unknown = formats.filter((f) => !FORMATS.includes(f));
+  if (unknown.length) throw new Error(`Unknown report format: ${unknown.join(", ")}. Formats: ${FORMATS.join(", ")}`);
   await mkdir(outDir, { recursive: true });
+  const written = [];
+  const write = async (name, content) => {
+    const path = join(outDir, name);
+    await writeFile(path, content);
+    written.push(path);
+  };
   for (const result of results) {
-    const base = join(outDir, `${slug(result.journey)}.${result.mode}`);
-    await writeFile(`${base}.md`, renderJourney(result));
-    await writeFile(`${base}.json`, JSON.stringify(result, null, 2));
+    const base = `${slug(result.journey)}.${result.mode}`;
+    if (formats.includes("md")) await write(`${base}.md`, renderJourney(result));
+    if (formats.includes("json")) await write(`${base}.json`, JSON.stringify(result, null, 2));
+    if (formats.includes("html")) await write(`${base}.html`, renderJourneyHtml(result));
   }
-  await writeFile(join(outDir, "summary.md"), renderSummary(results));
+  if (formats.includes("md")) await write("summary.md", renderSummary(results));
+  if (formats.includes("html")) await write("summary.html", renderSummaryHtml(results));
+  if (formats.includes("junit")) await write("junit.xml", renderJunit(results));
+  if (formats.includes("sarif")) await write("results.sarif", renderSarif(results));
+  if (formats.includes("csv")) {
+    await write("findings.csv", renderFindingsCsv(results));
+    await write("checks.csv", renderChecksCsv(results));
+  }
+  return written;
 }
