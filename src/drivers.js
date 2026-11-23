@@ -10,6 +10,8 @@
 //              logged-in Mac set up as described in docs/voiceover.md.
 //   orca       Real Orca on Linux through Guidepup, with Chromium. Needs Guidepup's setup
 //              (Ubuntu 26.04 or later); see .github/workflows/orca.yml.
+//   nvda       Real NVDA on Windows through Guidepup, with Chromium. Needs Guidepup's setup;
+//              see .github/workflows/nvda.yml.
 
 import { createRequire } from "node:module";
 import { describeFocusChromium, describeFocusPortable, speakFocus } from "./focus.js";
@@ -218,4 +220,36 @@ class OrcaDriver extends GuidepupDriver {
   }
 }
 
-export const DRIVERS = { walker: WalkerDriver, virtual: VirtualDriver, voiceover: VoiceOverDriver, orca: OrcaDriver };
+class NvdaDriver extends GuidepupDriver {
+  static id = "nvda";
+  static label = "NVDA (Windows, Chromium)";
+  static browser = "chromium";
+
+  async beforeBrowser() {
+    if (process.platform !== "win32") throw new Error("The nvda mode runs only on Windows.");
+    const { nvda } = await import("@guidepup/guidepup");
+    this.sr = nvda;
+    await nvda.start({ capture: "initial" });
+  }
+
+  async start() {
+    const { navigateNvdaToWebContent } = await import("./nvda-web-content.js");
+    this.cdp = await this.page.context().newCDPSession(this.page);
+    await this.cdp.send("Accessibility.enable");
+    await navigateNvdaToWebContent({ nvda: this.sr, page: this.page });
+    this.seen = (await this.sr.spokenPhraseLog()).length;
+    this.lastFocus = await this.focus();
+  }
+
+  focus() {
+    return describeFocusChromium(this.page, this.cdp);
+  }
+}
+
+export const DRIVERS = {
+  walker: WalkerDriver,
+  virtual: VirtualDriver,
+  voiceover: VoiceOverDriver,
+  orca: OrcaDriver,
+  nvda: NvdaDriver,
+};

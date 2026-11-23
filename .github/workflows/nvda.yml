@@ -1,0 +1,72 @@
+# Real NVDA (the Windows screen reader) through Guidepup, on a GitHub-hosted Windows runner.
+#
+# - On pull requests that touch the NVDA code: the self-test (test/nvda.test.js) against the
+#   fixture page.
+# - By hand (Actions tab): journeys against a site address, with the reports as an artifact.
+name: NVDA
+
+on:
+  pull_request:
+    paths:
+      - "src/drivers.js"
+      - "src/nvda-web-content.js"
+      - "src/journey.js"
+      - "test/nvda.test.js"
+      - ".github/workflows/nvda.yml"
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: "Site to test"
+        required: true
+      journeys:
+        description: "Journey files or folders, separated by spaces"
+        default: "targets/stem-accessibility"
+
+permissions:
+  contents: read
+
+jobs:
+  nvda:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # `setup` prepares Windows for automation; `install nvda` downloads Guidepup's portable NVDA.
+      - name: Guidepup setup
+        run: |
+          npx --yes @guidepup/setup@0.29.3 setup --ci
+          npx --yes @guidepup/setup@0.29.3 install nvda
+      - run: npx playwright install chromium
+      - name: Self-test with NVDA
+        if: github.event_name == 'pull_request'
+        env:
+          SRJ_NVDA: "1"
+          DEBUG: "guidepup:*"
+        run: node --test test/nvda.test.js
+      - name: Run journeys with NVDA
+        id: run
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          BASE_URL: ${{ inputs.base_url }}
+          JOURNEYS: ${{ inputs.journeys }}
+        run: node src/cli.js run $JOURNEYS --base-url "$BASE_URL" --mode nvda --out reports
+        continue-on-error: true
+      - name: Summary
+        if: always() && github.event_name == 'workflow_dispatch'
+        run: cat reports/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always() && github.event_name == 'workflow_dispatch'
+        with:
+          name: nvda-reports
+          path: reports
+      - name: Fail if a journey failed
+        if: steps.run.outcome == 'failure'
+        run: exit 1
