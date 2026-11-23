@@ -31,3 +31,7 @@ Append-only journal, oldest first. Earlier history: `git log` and `docs/handoff.
 2026-11-23 [code] The server and the tool get ESLint, tsc --checkJs (JSDoc, non-strict) and a coverage gate on server/ at 85%; CI runs them.
 
 2026-11-23 [code] R2.5 (review of #11): the portable focus reader and selectOption take the last :focus match, so focus inside a shadow root is the focused element; live regions in shadow roots are still not heard.
+
+2026-11-23 [code] Review of #11 round 2: the run's work folder stays root-owned, the reports folder is checked before reading, processes are killed by user (kill -1 as that user) and counted by thread, hard links are refused.
+
+2026-11-23 [decision] PManager: tini as PID 1 in the image (ENTRYPOINT ["/usr/bin/tini", "--"]), so orphaned zombies are reaped.

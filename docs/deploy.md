@@ -282,13 +282,27 @@ domain only you control, where you can.
   - The server holds the public anon key and `WORKER_TOKEN`, and never the service-role key.
   - A leaked `WORKER_TOKEN` lets its holder claim, fill in, finish or requeue runs. It cannot read
     anyone's runs, results or reports.
-  - **The run's files are not trusted.** Before the server reads a run's reports, it ends every
-    process of `RUN_AS_UID`, so nothing can change the folder while it is read and nothing
-    outlives the run into the next person's. It ends them again before each run starts. It
-    lists the folder without following links and keeps regular files only. It opens each file
-    with `O_NOFOLLOW`, checks the open handle (a regular file, at most 2 MiB), reads no further
-    than that, and refuses a file whose folder resolves outside the reports folder. So a link to
-    `/proc/self/environ`, or to any file only root can read, is never read (`server/reports.js`).
+  - **The run's files are not trusted.** The run's user (`RUN_AS_UID`) can write anything into
+    its reports folder, and the server reads that folder as root. So (`server/reports.js`):
+    - the run's work folder belongs to the server (mode 0755); only `reports/` and `home/` inside
+      it are the run user's, so the run cannot rename or replace them. Before reading, the
+      server checks that `reports/` is still the folder it made: not a link, the same inode, the
+      same owner;
+    - before each run, before its reports are read, and when it ends on any path, the server
+      ends every process of that user. It kills them by user, not by pid (a helper running as
+      that user calls `kill(-1, SIGKILL)`), and waits until none has a live thread, so a
+      process whose main thread has exited is caught too;
+    - it lists the folder without following links, and keeps regular files only;
+    - it opens each file with `O_NOFOLLOW`, and checks the open handle: a regular file, owned by
+      the run's user, with a single link (so not a hard link to another file), of at most 2 MiB.
+      It reads no further than that, and refuses a file whose folder resolves outside the
+      reports folder as recorded when it was made.
+
+    So a link to `/proc/self/environ`, a folder swapped for a link, or a hard link never makes
+    the server read a file the run could not.
+  - **PID 1** in the image is `tini` (`ENTRYPOINT ["/usr/bin/tini", "--"]`), which reaps
+    orphaned processes, so a run's leftovers do not pile up as zombies. It also passes Render's
+    SIGTERM on to the server, which then puts a run in progress back in the queue.
   - The run process that drives the browser gets only a short list of harmless variables (`PATH`,
     `HOME`, `TMPDIR`, the locale and time zone, `NODE_ENV` and `PLAYWRIGHT_BROWSERS_PATH`). It runs as `runner`, an unprivileged user, while the
     server runs as root. So even a page that breaks out of Chromium cannot read the server's

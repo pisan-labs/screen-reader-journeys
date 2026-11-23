@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import dgram from "node:dgram";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { link, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -355,7 +355,51 @@ describe("worker, with a fake run process", () => {
     }
   });
 
-  it("with RUN_AS_UID, stops that user's processes before the run and before reading its reports", async () => {
+  it("reads nothing when the run has replaced its reports folder with a link (R2.2-1)", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "srj-outside-"));
+    const MARKER = "MARKER-in-a-folder-the-run-pointed-at";
+    await writeFile(join(outside, "credentials.json"), JSON.stringify({ secret: MARKER }));
+    try {
+      const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+      const fake = fakeSupabase({ runs: [run] });
+      const execute = async (job) => {
+        await writeFile(join(job.outDir, "summary.md"), "# Summary");
+        await rename(job.outDir, `${job.outDir}.old`);
+        await symlink(outside, job.outDir);
+        return { outcome: "done", error: null, results: [summary(BASIC, "walker")], blocked: [] };
+      };
+      await createWorker({ db: dbOf(fake), catalog, config, execute, lookup, log: quiet }).tick();
+      assert.equal(fake.run(run.id).status, "failed");
+      assert.equal(fake.tables.run_reports.length, 0);
+      assert.ok(!fake.calls.some((c) => JSON.stringify(c.args ?? {}).includes(MARKER)), "the marker was sent");
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves out a hard link to a file outside the run (R2.2-3)", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "srj-outside-"));
+    const MARKER = "MARKER-behind-a-hard-link";
+    await writeFile(join(outside, "secret.txt"), MARKER);
+    try {
+      const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+      const fake = fakeSupabase({ runs: [run] });
+      const execute = async (job) => {
+        await writeFile(join(job.outDir, "summary.md"), "# Summary");
+        await link(join(outside, "secret.txt"), join(job.outDir, "hard.txt"));
+        return { outcome: "done", error: null, results: [summary(BASIC, "walker")], blocked: [] };
+      };
+      await createWorker({ db: dbOf(fake), catalog, config, execute, lookup, log: quiet }).tick();
+      assert.equal(fake.run(run.id).status, "done");
+      assert.deepEqual(fake.tables.run_reports.map((r) => r.path), ["summary.md"]);
+      assert.deepEqual(fake.run(run.id).summary.skipped_files, ["hard.txt"]);
+      assert.ok(!fake.calls.some((c) => JSON.stringify(c.args ?? {}).includes(MARKER)), "the marker was sent");
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("with RUN_AS_UID, stops that user's processes before the run, before reading its reports, and at the end", async () => {
     const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
     const fake = fakeSupabase({ runs: [run] });
     const events = [];
@@ -363,12 +407,13 @@ describe("worker, with a fake run process", () => {
       events.push("execute");
       return { outcome: "done", error: null, results: [summary(BASIC, "walker")], blocked: [] };
     };
-    const stopProcesses = async (uid) => events.push(`stop ${uid}`);
+    const stopProcesses = async (runAs) => events.push(`stop ${runAs.uid}:${runAs.gid}`);
     // runAs needs root for chown; a uid of our own keeps it working without root.
     const uid = process.getuid();
-    const own = { ...config, runAs: { uid, gid: process.getgid() } };
+    const gid = process.getgid();
+    const own = { ...config, runAs: { uid, gid } };
     await createWorker({ db: dbOf(fake), catalog, config: own, execute, lookup, log: quiet, stopProcesses }).tick();
-    assert.deepEqual(events, [`stop ${uid}`, "execute", `stop ${uid}`]);
+    assert.deepEqual(events, [`stop ${uid}:${gid}`, "execute", `stop ${uid}:${gid}`, `stop ${uid}:${gid}`]);
     assert.equal(fake.run(run.id).status, "done");
   });
 
@@ -377,7 +422,7 @@ describe("worker, with a fake run process", () => {
     const fake = fakeSupabase({ runs: [run] });
     let stops = 0;
     const stopProcesses = async () => {
-      if (++stops === 2) throw new Error("processes of user 10001 are still running: 99");
+      if (++stops >= 2) throw new Error("processes of user 10001 are still running: 99");
     };
     const execute = async (job) => {
       await writeFile(join(job.outDir, "summary.md"), "# Summary");
