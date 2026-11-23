@@ -1,5 +1,5 @@
 // The dashboard: sign in with a Supabase magic link, start runs through the API, follow a run
-// and download its reports through signed Storage URLs.
+// and download its reports from the run_reports table.
 //
 // Accessibility: every view is plain HTML (headings, labelled fields, fieldsets, tables, links
 // and buttons); a page change moves focus to its heading; progress goes to the role="status"
@@ -16,7 +16,6 @@ const MODES = {
   virtual: ["Emulated screen reader", "Guidepup's Virtual Screen Reader: its speech for each step, and line-by-line reading."],
 };
 const POLL_MS = 4000;
-const LINK_SECONDS = 3600;
 
 const $ = (id) => document.getElementById(id);
 const view = $("view");
@@ -99,7 +98,10 @@ function show(title, nodes, { focus = true } = {}) {
 
 const configured = Boolean(config.supabaseUrl && config.supabaseAnonKey && config.apiUrl);
 const supabase = configured
-  ? createClient(config.supabaseUrl, config.supabaseAnonKey, { auth: { flowType: "pkce", persistSession: true, detectSessionInUrl: true } })
+  ? createClient(config.supabaseUrl, config.supabaseAnonKey, {
+      auth: { flowType: "pkce", persistSession: true, detectSessionInUrl: true },
+      db: { schema: "app_screen_reader_journeys" },
+    })
   : null;
 
 class ApiError extends Error {
@@ -352,12 +354,25 @@ async function renderHome({ focus = true } = {}) {
 
 let pollTimer;
 
-async function signedLinks(paths) {
+let reportUrls = [];
+
+/** Download links for a run's report files, read from run_reports (row level security: your own runs only). */
+async function reportLinks(runId, paths) {
+  for (const url of reportUrls) URL.revokeObjectURL(url);
+  reportUrls = [];
   if (!paths.length) return new Map();
-  const { data, error } = await supabase.storage.from("reports").createSignedUrls(paths, LINK_SECONDS, { download: true });
-  if (error) throw new Error(`The download links could not be made: ${error.message}`);
-  return new Map(data.filter((d) => d.signedUrl).map((d) => [d.path, d.signedUrl]));
+  const { data, error } = await supabase.from("run_reports").select("path, content_type, body").eq("run_id", runId).in("path", paths);
+  if (error) throw new Error(`The reports could not be loaded: ${error.message}`);
+  return new Map(
+    data.map((d) => {
+      const url = URL.createObjectURL(new Blob([d.body], { type: d.content_type }));
+      reportUrls.push(url);
+      return [d.path, url];
+    })
+  );
 }
+
+const fileName = (path) => path.split("/").pop();
 
 function runDetails(run, list, links) {
   const facts = [
@@ -401,13 +416,13 @@ function runDetails(run, list, links) {
                 h("td", {}, badge(RESULT[r.status] ?? [r.status, "bad"])),
                 h("td", {}, `${r.checks_passed} of ${r.checks_total}`),
                 h("td", {}, `${plural(r.errors, "error")}, ${plural(r.warnings, "warning")}`),
-                h("td", {}, link ? h("a", { href: link }, "Download", hidden(` the report for ${name}, ${mode}`)) : "—")
+                h("td", {}, link ? h("a", { href: link, download: fileName(r.report_path) }, "Download", hidden(` the report for ${name}, ${mode}`)) : "—")
               );
             })
           )
         ), "Results table")
       : h("p", {}, run.status === "done" || run.status === "failed" ? "This run has no results." : "Results appear here when the run finishes."),
-    files.length ? [h("h2", {}, "Downloads"), h("p", {}, "Every file the run wrote. The links work for an hour; reload the page for new ones."), h("ul", { class: "files" }, files.map((path) => h("li", {}, links.get(path) ? h("a", { href: links.get(path) }, path.split("/").slice(1).join("/")) : path.split("/").slice(1).join("/"))))] : null,
+    files.length ? [h("h2", {}, "Downloads"), h("p", {}, "Every file the run wrote."), h("ul", { class: "files" }, files.map((path) => h("li", {}, links.get(path) ? h("a", { href: links.get(path), download: fileName(path) }, path) : path)))] : null,
     blocked.length
       ? [h("h2", {}, "Blocked requests"), h("p", {}, "The server's network guard stopped the page from reaching these addresses. A journey that needs one may have failed because of it."), h("ul", {}, blocked.map((b) => h("li", { class: "url" }, b)))]
       : null,
@@ -448,7 +463,7 @@ async function renderRun(id, { focus = true } = {}) {
       const list = await loadCatalog().catch(() => null);
       let links = new Map();
       try {
-        links = await signedLinks([...new Set([...(run.summary?.files ?? []), ...(run.run_results ?? []).map((r) => r.report_path).filter(Boolean)])]);
+        links = await reportLinks(run.id, [...new Set([...(run.summary?.files ?? []), ...(run.run_results ?? []).map((r) => r.report_path).filter(Boolean)])]);
       } catch (error) {
         showError(error.message);
       }

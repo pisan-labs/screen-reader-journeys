@@ -1,7 +1,7 @@
-# Render Blueprint for the hosted service; docs/deploy.md walks through it. One Docker web
-# service runs the HTTP API and the worker. Secrets are not in this file: Render asks for each
-# `sync: false` value when the Blueprint is first applied, and keeps them in the service's
-# environment.
+# Render settings for the hosted service; docs/deploy.md walks through them. One Docker web
+# service runs the HTTP API and the worker. For the HintWise deployment PManager creates the
+# service from claude-built-apps, with these settings. Secrets are not in this file: each
+# `sync: false` value is set in the service's environment. There is no service-role key.
 services:
   - type: web
     name: screen-reader-journeys
@@ -12,8 +12,8 @@ services:
     # wait until the next request wakes it) and has 512 MB, which Chromium can exceed on large
     # pages. For regular use choose "standard" (2 GB). See docs/deploy.md.
     plan: free
-    # Put it near the Supabase project.
-    region: frankfurt
+    # Near the shared Supabase project (us-east-1).
+    region: virginia
     # The worker runs one run at a time per instance; keep a single instance.
     numInstances: 1
     healthCheckPath: /health
@@ -22,9 +22,10 @@ services:
         sync: false
       - key: SUPABASE_ANON_KEY
         sync: false
-      - key: SUPABASE_SERVICE_ROLE_KEY
+      # The worker's proof to the worker_* functions; only its SHA-256 is in the database.
+      - key: WORKER_TOKEN
         sync: false
-      # The dashboard's origin, e.g. https://screen-reader-journeys.netlify.app
+      # The dashboard's origin: https://screen-reader-journeys.hintwise.org
       - key: ALLOWED_ORIGINS
         sync: false
       # Sites the server may test, comma-separated: exact hosts, or "*." for subdomains, e.g.
