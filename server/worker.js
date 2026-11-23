@@ -1,6 +1,6 @@
-// The in-process worker: claim the oldest queued run, run it, upload the reports, record the
-// results. One run at a time. `admin` is a Supabase client with the service role key (or a
-// fake with the same methods, in the tests).
+// The in-process worker: claim the oldest queued run, run it, save the reports, record the
+// results. One run at a time. `db` is workerDb() from worker-db.js: the token-checked worker_*
+// functions, and nothing else (or a fake with the same methods, in the tests).
 
 import { chown, mkdir, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -10,7 +10,8 @@ import { executeRun } from "./execute.js";
 import { resolveEgress } from "./hosts.js";
 import { validateRunRequest } from "./validate.js";
 
-export const BUCKET = "reports";
+/** A report larger than this is left out (the database refuses it); the summary says so. */
+export const MAX_REPORT_BYTES = 2 * 1024 * 1024;
 
 /** A run still "running" this long after its timeout belonged to a server that stopped. */
 const STALE_GRACE_MS = 10 * 60 * 1000;
@@ -38,7 +39,7 @@ async function listFiles(dir) {
   return files.sort();
 }
 
-export function summarizeRun({ results, blocked, outcome }, files) {
+export function summarizeRun({ results, blocked, outcome }, files, skipped = []) {
   return {
     results: results.length,
     passed: results.filter((r) => r.status === "pass").length,
@@ -47,62 +48,48 @@ export function summarizeRun({ results, blocked, outcome }, files) {
     errors: results.reduce((sum, r) => sum + r.errors, 0),
     warnings: results.reduce((sum, r) => sum + r.warnings, 0),
     files,
+    ...(skipped.length ? { skipped_files: skipped } : {}),
     blocked_requests: [...new Set(blocked)].slice(0, 50),
     timed_out: outcome === "timeout",
   };
 }
 
-export function createWorker({ admin, catalog, config, execute = executeRun, lookup, log = console }) {
+export function createWorker({ db, catalog, config, execute = executeRun, lookup, log = console }) {
   let stopping = false;
   let loop = null;
   let current = null; // AbortController of the run in progress
   let wake = () => {};
 
-  const check = (what, { error }) => {
-    if (error) throw new Error(`${what}: ${error.message}`);
-  };
-
-  async function failStaleRuns() {
-    const cutoff = new Date(Date.now() - config.runTimeoutMs - STALE_GRACE_MS).toISOString();
-    check(
-      "failing stale runs",
-      await admin
-        .from("runs")
-        .update({ status: "failed", error: "The server stopped before this run finished.", finished_at: new Date().toISOString() })
-        .eq("status", "running")
-        .lt("started_at", cutoff)
-    );
-  }
-
-  async function claim() {
-    const { data, error } = await admin.rpc("claim_next_run");
-    if (error) throw new Error(`claim_next_run: ${error.message}`);
-    return (Array.isArray(data) ? data[0] : data) ?? null;
-  }
+  const failStaleRuns = () => db.failStaleRuns((config.runTimeoutMs + STALE_GRACE_MS) / 1000);
 
   async function finish(run, fields) {
-    check("finishing the run", await admin.from("runs").update({ ...fields, finished_at: new Date().toISOString() }).eq("id", run.id));
+    await db.finish(run.id, fields);
     log.log(`run ${run.id}: ${fields.status}${fields.error ? ` (${fields.error})` : ""}`);
   }
 
-  async function upload(runId, dir) {
-    const uploaded = [];
+  /** Save each report file the run wrote. Resolves to the saved paths and the ones left out. */
+  async function saveReports(runId, dir) {
+    const saved = [];
+    const skipped = [];
     for (const file of await listFiles(dir)) {
-      const path = `${runId}/${file}`;
-      const body = await readFile(join(dir, file));
-      const contentType = CONTENT_TYPES[extname(file)] ?? "application/octet-stream";
-      check(`uploading ${path}`, await admin.storage.from(BUCKET).upload(path, body, { contentType, upsert: true }));
-      uploaded.push(path);
+      const type = CONTENT_TYPES[extname(file)];
+      const body = type ? await readFile(join(dir, file), "utf8") : null;
+      if (!type || Buffer.byteLength(body) > MAX_REPORT_BYTES) {
+        skipped.push(file);
+        log.log(`run ${runId}: left out ${file} (${type ? "too large" : "not a report type"})`);
+        continue;
+      }
+      if (!(await db.saveReport(runId, file, type, body))) break; // the run was deleted
+      saved.push(file);
     }
-    return uploaded;
+    return { saved, skipped };
   }
 
   async function recordResults(runId, results, files) {
     if (!results.length) return;
     const rows = results.map((r) => {
-      const report = `${runId}/${r.report_base}.md`;
+      const report = `${r.report_base}.md`;
       return {
-        run_id: runId,
         journey: r.journey,
         mode: r.mode,
         status: r.status,
@@ -113,7 +100,7 @@ export function createWorker({ admin, catalog, config, execute = executeRun, loo
         report_path: files.includes(report) ? report : null,
       };
     });
-    check("saving results", await admin.from("run_results").insert(rows));
+    await db.addResults(runId, rows);
   }
 
   /**
@@ -160,13 +147,13 @@ export function createWorker({ admin, catalog, config, execute = executeRun, loo
       const outcome = await execute(job, { timeoutMs: config.runTimeoutMs, signal: current.signal, runAs });
       if (outcome.outcome === "aborted") {
         // The server is shutting down (a deploy, say): put the run back for the next instance.
-        check("requeueing", await admin.from("runs").update({ status: "queued", started_at: null }).eq("id", run.id).eq("status", "running"));
+        await db.requeue(run.id);
         log.log(`run ${run.id}: requeued`);
         return;
       }
-      const files = await upload(run.id, outDir);
+      const { saved: files, skipped } = await saveReports(run.id, outDir);
       await recordResults(run.id, outcome.results, files);
-      const summary = summarizeRun(outcome, files);
+      const summary = summarizeRun(outcome, files, skipped);
       const expected = job.journeys.length * job.modes.length;
       if (outcome.outcome === "done") return await finish(run, { status: "done", error: null, summary });
       const error =
@@ -175,7 +162,7 @@ export function createWorker({ admin, catalog, config, execute = executeRun, loo
           : short(outcome.error ?? "The run failed.");
       return await finish(run, { status: "failed", error, summary });
     } catch (error) {
-      // The details (storage and database messages) go to the log, not to the user.
+      // The details (database messages) go to the log, not to the user.
       log.error(`run ${run.id}: ${error.stack ?? error}`);
       await finish(run, { status: "failed", error: "The server could not finish this run. Try again, or ask the administrator to check the server log." }).catch((e) =>
         log.error(e.message)
@@ -190,7 +177,7 @@ export function createWorker({ admin, catalog, config, execute = executeRun, loo
   async function tick() {
     await failStaleRuns();
     if (stopping) return false; // do not claim a run this server would have to give back
-    const run = await claim();
+    const run = await db.claim();
     if (!run) return false;
     await processRun(run);
     return true;

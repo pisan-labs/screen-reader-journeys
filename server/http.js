@@ -81,7 +81,7 @@ export function createHandler({ config, catalog, auth, userClient, version = "de
     if (!check.ok) return [400, { error: check.errors.map((e) => e.message).join(" "), errors: check.errors }];
     const { data, error } = await userClient(who.token)
       .from("runs")
-      .insert({ created_by: who.user.id, status: "queued", ...check.value })
+      .insert({ user_id: who.user.id, status: "queued", ...check.value })
       .select()
       .single();
     if (error) {

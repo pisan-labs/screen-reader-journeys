@@ -94,10 +94,21 @@ describe("run request validation", () => {
 });
 
 describe("settings", () => {
-  const env = { SUPABASE_URL: "https://abc.supabase.co", SUPABASE_ANON_KEY: "anon", SUPABASE_SERVICE_ROLE_KEY: "service" };
+  const env = { SUPABASE_URL: "https://auth.hintwise.org", SUPABASE_ANON_KEY: "anon", WORKER_TOKEN: "worker-token-for-tests-0123456789abcdef" };
 
-  it("needs the Supabase settings and lists every missing one", () => {
-    assert.throws(() => loadConfig({}), (e) => /SUPABASE_URL is not set/.test(e.message) && /SUPABASE_ANON_KEY is not set/.test(e.message) && /SUPABASE_SERVICE_ROLE_KEY is not set/.test(e.message));
+  it("needs the Supabase settings and the worker token, and lists every missing one", () => {
+    assert.throws(() => loadConfig({}), (e) => /SUPABASE_URL is not set/.test(e.message) && /SUPABASE_ANON_KEY is not set/.test(e.message) && /WORKER_TOKEN is not set/.test(e.message));
+  });
+
+  it("keeps the worker token, and refuses one that is too short", () => {
+    assert.equal(loadConfig(env).workerToken, env.WORKER_TOKEN);
+    assert.throws(() => loadConfig({ ...env, WORKER_TOKEN: "short" }), /WORKER_TOKEN must be at least 32 characters/);
+    assert.throws(() => loadConfig({ ...env, WORKER_TOKEN: "x".repeat(201) }), /WORKER_TOKEN must be at most 200 characters/);
+  });
+
+  it("refuses to start with the service-role key in its environment", () => {
+    assert.throws(() => loadConfig({ ...env, SUPABASE_SERVICE_ROLE_KEY: "service" }), /SUPABASE_SERVICE_ROLE_KEY is set: remove it/);
+    assert.doesNotThrow(() => loadConfig({ ...env, SUPABASE_SERVICE_ROLE_KEY: " " }));
   });
 
   it("defaults to no origins and no target hosts, so nothing is allowed", () => {
@@ -208,7 +219,7 @@ describe("HTTP API", () => {
     assert.deepEqual(tokensSeen, ["alice-token"]);
     const insert = fake.calls.findLast((c) => c.op === "insert" && c.table === "runs");
     assert.equal(insert.user, ALICE.id, "inserted through the user's client, so RLS applies");
-    assert.deepEqual(insert.values, { created_by: ALICE.id, status: "queued", base_url: "https://preview.vercel.app/", journeys: [HOME], modes: ["walker"] });
+    assert.deepEqual(insert.values, { user_id: ALICE.id, status: "queued", base_url: "https://preview.vercel.app/", journeys: [HOME], modes: ["walker"] });
     assert.equal(body.run.status, "queued");
     assert.equal(headers.get("location"), `/runs/${body.run.id}`);
   });

@@ -172,18 +172,25 @@ Chromium reports: `button`, `link`, `combobox`, `checkbox`, `heading` and so on.
 
 ## As a hosted service
 
-The tool can also run as a service with a dashboard: people sign in with an emailed link, choose
-a site and journeys, and download the reports when the run finishes. It runs the `walker` and
-`virtual` modes only.
+The tool also runs as a service with a dashboard, a HintWise app at
+`https://screen-reader-journeys.hintwise.org`. People sign in, choose a site and journeys, and
+download the reports when the run finishes. It runs the `walker` and `virtual` modes only.
 
-- **Supabase** (`supabase/`): sign-in, the runs and their results, and the reports bucket.
+The hosted service is these parts, and only these:
+
+- **Supabase** (`supabase/`): the schema `app_screen_reader_journeys` on the shared HintWise
+  project, holding runs, their results and their reports, with row level security.
 - **Render** (`render.yaml`, `Dockerfile`, `server/`): the API and the worker that runs journeys
   in Chromium. It tests only the sites listed in `ALLOWED_TARGET_HOSTS`, and only the journeys in
-  its own `targets/`.
+  its own `targets/`. The worker reaches the database only through token-checked functions; there
+  is no service-role key.
 - **Netlify** (`netlify.toml`, `web/`): the dashboard.
 
-[docs/deploy.md](docs/deploy.md) walks through setting up all three, testing the deployment, and
-running everything locally. `.env.example` lists every setting.
+The command-line tool (`src/`, `targets/`) and its GitHub workflows are not part of it. They hold
+no service-role key and no Anthropic key.
+
+[docs/deploy.md](docs/deploy.md) says who sets up each part, how to test the deployment, and how
+to run the tests locally. `.env.example` lists every setting.
 
 ## What the automatic findings mean
 

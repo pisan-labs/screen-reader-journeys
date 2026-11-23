@@ -74,8 +74,8 @@ async function fakeBackend(page, { signedIn, posted = [] }) {
     started_at: "2026-11-23T10:00:05Z",
     finished_at: runReads > 1 ? "2026-11-23T10:00:40Z" : null,
     error: null,
-    summary: runReads > 1 ? { results: 1, passed: 1, failed: 0, errored: 0, errors: 2, warnings: 1, files: [`${RUN_ID}/home-page-tab-order.walker.md`, `${RUN_ID}/summary.md`], blocked_requests: [], timed_out: false } : null,
-    run_results: runReads > 1 ? [{ id: "r1", run_id: RUN_ID, journey: HOME, mode: "walker", status: "pass", checks_passed: 0, checks_total: 0, errors: 2, warnings: 1, report_path: `${RUN_ID}/home-page-tab-order.walker.md` }] : [],
+    summary: runReads > 1 ? { results: 1, passed: 1, failed: 0, errored: 0, errors: 2, warnings: 1, files: ["home-page-tab-order.walker.md", "summary.md"], blocked_requests: [], timed_out: false } : null,
+    run_results: runReads > 1 ? [{ id: "r1", run_id: RUN_ID, journey: HOME, mode: "walker", status: "pass", checks_passed: 0, checks_total: 0, errors: 2, warnings: 1, report_path: "home-page-tab-order.walker.md" }] : [],
   });
   await page.route(`${SUPABASE}/**`, async (route) => {
     const request = route.request();
@@ -84,10 +84,12 @@ async function fakeBackend(page, { signedIn, posted = [] }) {
     if (pathname === "/auth/v1/otp") return json(route, {});
     if (pathname === "/auth/v1/user") return json(route, USER);
     if (pathname === "/auth/v1/logout") return route.fulfill({ status: 204, headers: cors });
+    // The app's own schema, as supabase-js asks for it.
+    if (pathname.startsWith("/rest/v1/") && request.headers()["accept-profile"] !== "app_screen_reader_journeys") return json(route, { message: "wrong schema" }, 406);
     if (pathname === "/rest/v1/runs") return json(route, posted.length ? [{ id: RUN_ID, base_url: "https://preview.vercel.app/", status: "queued", created_at: "2026-11-23T10:00:00Z", summary: null }] : []);
-    if (pathname === "/storage/v1/object/sign/reports") {
-      const { paths } = JSON.parse(request.postData());
-      return json(route, paths.map((path) => ({ path, signedURL: `/object/sign/reports/${path}?token=t`, error: null })));
+    if (pathname === "/rest/v1/run_reports") {
+      const paths = /^in\.\((.*)\)$/.exec(new URL(request.url()).searchParams.get("path") ?? "")?.[1].split(",").map((p) => p.replace(/^"|"$/g, "")) ?? [];
+      return json(route, paths.map((path) => ({ path, content_type: "text/markdown; charset=utf-8", body: `# ${path}` })));
     }
     return json(route, { message: `unexpected ${pathname}` }, 404);
   });

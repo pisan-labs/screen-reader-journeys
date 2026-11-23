@@ -52,8 +52,13 @@ export function loadConfig(env = process.env) {
   const config = {
     supabaseUrl: need("SUPABASE_URL"),
     supabaseAnonKey: need("SUPABASE_ANON_KEY"),
-    supabaseServiceRoleKey: need("SUPABASE_SERVICE_ROLE_KEY"),
+    // The worker's proof to the worker_* functions; the database keeps only its SHA-256.
+    workerToken: need("WORKER_TOKEN"),
   };
+  if (config.workerToken && config.workerToken.length < 32) problems.push("WORKER_TOKEN must be at least 32 characters (make one with: openssl rand -base64 32)");
+  if (config.workerToken && config.workerToken.length > 200) problems.push("WORKER_TOKEN must be at most 200 characters");
+  // HintWise apps never hold the service-role key; refuse to start with one in reach.
+  if (!blank(env.SUPABASE_SERVICE_ROLE_KEY)) problems.push("SUPABASE_SERVICE_ROLE_KEY is set: remove it. This server needs only the anon key and WORKER_TOKEN");
   const attempt = (fn) => {
     try {
       return fn();

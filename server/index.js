@@ -10,6 +10,7 @@ import { loadConfig } from "./config.js";
 import { timeoutFetch } from "./timeout-fetch.js";
 import { createHandler } from "./http.js";
 import { createWorker } from "./worker.js";
+import { SCHEMA, workerDb } from "./worker-db.js";
 
 let config;
 try {
@@ -20,7 +21,7 @@ try {
 }
 
 // The browser must not run as this server's own user, or a page that breaks out of it could read
-// the Supabase keys from this process's environment. The Docker image starts the server as root
+// WORKER_TOKEN from this process's environment. The Docker image starts the server as root
 // and gives each run to the unprivileged user named by RUN_AS_UID.
 const root = process.getuid?.() === 0;
 if (root && !config.runAs) {
@@ -36,9 +37,11 @@ if (!config.runAs) console.warn("warning: the browser runs as this server's own 
 const { version } = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 const catalog = await loadCatalog();
 const fetch = timeoutFetch(config.supabaseTimeoutMs);
-const clientOptions = { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }, global: { fetch } };
+// Every client uses the public anon key and the app's own schema. People's requests carry their
+// own token, so row level security decides what they may do; the worker proves itself to the
+// worker_* functions with WORKER_TOKEN. There is no service-role key.
+const clientOptions = { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }, db: { schema: SCHEMA }, global: { fetch } };
 const anon = createClient(config.supabaseUrl, config.supabaseAnonKey, clientOptions);
-const admin = createClient(config.supabaseUrl, config.supabaseServiceRoleKey, clientOptions);
 const userClient = (token) =>
   createClient(config.supabaseUrl, config.supabaseAnonKey, { ...clientOptions, global: { fetch, headers: { Authorization: `Bearer ${token}` } } });
 
@@ -51,7 +54,7 @@ server.listen(config.port, "0.0.0.0", () => {
   console.log(`allowed origins: ${config.allowedOrigins.join(", ") || "none (ALLOWED_ORIGINS is empty)"}`);
 });
 
-const worker = createWorker({ admin, catalog, config });
+const worker = createWorker({ db: workerDb(anon, config.workerToken), catalog, config });
 worker.start();
 
 let stopping = false;
