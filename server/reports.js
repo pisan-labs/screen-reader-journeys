@@ -147,35 +147,67 @@ export async function processesOf(uid, procDir = "/proc") {
 /**
  * Send SIGKILL to every process of `uid` at once, from a short-lived helper that runs as that
  * user: kill(-1) signals every process the caller may signal, except itself, so the kernel picks
- * them by user. No pid can be missed or reused between a scan and the kill.
+ * them by user, including any started since the last scan.
+ *
+ * Running as that user, the helper can itself be stopped or killed by one of the processes it is
+ * meant to end. So root ends it after `limitMs` whatever state it is in, and the caller also kills
+ * every listed pid from root, which those processes cannot block.
  *
  * @param {number} uid
  * @param {number} gid
+ * @param {{ limitMs?: number }} [options]
  * @returns {Promise<void>}
  */
-export function killAllOf(uid, gid) {
+export function killAllOf(uid, gid, { limitMs = 1000 } = {}) {
   return new Promise((resolve) => {
     const helper = spawn(process.execPath, ["-e", "try { process.kill(-1, 'SIGKILL'); } catch {}"], { uid, gid, env: {}, cwd: "/", stdio: "ignore" });
-    helper.on("exit", () => resolve());
-    helper.on("error", () => resolve());
+    const timer = setTimeout(() => helper.kill("SIGKILL"), limitMs);
+    const done = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    helper.on("exit", done);
+    helper.on("error", done);
   });
 }
 
+/** SIGKILL each pid from here (root): a process cannot block or catch it. */
+function killEach(pids, kill) {
+  for (const pid of pids) {
+    try {
+      kill(pid, "SIGKILL");
+    } catch {
+      // It ended on its own.
+    }
+  }
+}
+
 /**
- * End every process of `uid`, and wait until none has a live thread. Throws if some are still
- * there after `timeoutMs`, so that the caller reads nothing they could still change.
+ * End every process of `uid`, and wait until none has a live thread. Each pass kills every
+ * listed pid from root and then, as that user, everything of that user; neither step can make
+ * the wait last past `timeoutMs`. Throws if some are still there then, so that the caller reads
+ * and deletes nothing they could still change.
  *
  * @param {number} uid never 0: the server's own user
- * @param {{ gid?: number, procDir?: string, timeoutMs?: number, killAll?: (uid: number, gid: number) => Promise<unknown> }} [options]
+ * @param {{
+ *   gid?: number,
+ *   procDir?: string,
+ *   timeoutMs?: number,
+ *   killAll?: (uid: number, gid: number) => Promise<unknown>,
+ *   kill?: (pid: number, signal: string) => unknown,
+ * }} [options]
  */
-export async function stopUserProcesses(uid, { gid = uid, procDir = "/proc", timeoutMs = 10000, killAll = killAllOf } = {}) {
+export async function stopUserProcesses(uid, { gid = uid, procDir = "/proc", timeoutMs = 10000, killAll = killAllOf, kill = (pid, signal) => process.kill(pid, signal) } = {}) {
   if (!Number.isInteger(uid) || uid <= 0) throw new Error(`stopUserProcesses needs a user other than root, not ${uid}`);
   const deadline = Date.now() + timeoutMs;
+  const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   for (;;) {
     const pids = await processesOf(uid, procDir);
     if (!pids.length) return;
     if (Date.now() > deadline) throw new Error(`processes of user ${uid} are still running: ${pids.join(", ")}`);
-    await killAll(uid, gid);
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    killEach(pids, kill);
+    // A helper that never comes back cannot hold the stop past its deadline.
+    await Promise.race([killAll(uid, gid), pause(Math.max(0, deadline - Date.now()))]);
+    await pause(25);
   }
 }

@@ -106,6 +106,8 @@ describe("stopping the run's processes", () => {
     calls.push([uid, gid]);
     for (const [pid, owner] of uids) if (owner === uid) execFileSync("rm", ["-rf", join(proc, String(pid))]);
   };
+  /** Never signal a real process from a fake /proc's pids: record them instead. */
+  const fakeKill = (killed = []) => (pid, signal) => killed.push([pid, signal]);
 
   it("finds the live processes of a user, including one whose main thread has exited", async () => {
     const proc = await fakeProc([
@@ -127,8 +129,10 @@ describe("stopping the run's processes", () => {
     const entries = [[21, 10001], [22, 10001, "Z (zombie)", [[22, "Z (zombie)"], [23, "R (running)"]]], [24, 0]];
     const proc = await fakeProc(entries);
     const calls = [];
-    await stopUserProcesses(10001, { gid: 10002, procDir: proc, killAll: killer(proc, entries, calls) });
+    const killed = [];
+    await stopUserProcesses(10001, { gid: 10002, procDir: proc, killAll: killer(proc, entries, calls), kill: fakeKill(killed) });
     assert.deepEqual(calls, [[10001, 10002]], "one kill for the whole user");
+    assert.deepEqual(killed, [[21, "SIGKILL"], [22, "SIGKILL"]], "and each listed pid from root");
     assert.deepEqual(await processesOf(10001, proc), []);
     assert.deepEqual(await processesOf(0, proc), [24], "root's process is left alone");
     await rm(proc, { recursive: true });
@@ -136,8 +140,19 @@ describe("stopping the run's processes", () => {
 
   it("gives up with an error when one will not end, and never acts for root", async () => {
     const proc = await fakeProc([[31, 10001]]);
-    await assert.rejects(stopUserProcesses(10001, { procDir: proc, timeoutMs: 100, killAll: async () => {} }), /processes of user 10001 are still running: 31/);
+    await assert.rejects(stopUserProcesses(10001, { procDir: proc, timeoutMs: 100, killAll: async () => {}, kill: fakeKill() }), /processes of user 10001 are still running: 31/);
     await assert.rejects(stopUserProcesses(0, { procDir: proc }), /a user other than root/);
+    await rm(proc, { recursive: true });
+  });
+
+  it("still throws at its deadline when the helper never comes back (R2.3-1)", async () => {
+    const proc = await fakeProc([[41, 10001]]);
+    const started = Date.now();
+    await assert.rejects(
+      stopUserProcesses(10001, { procDir: proc, timeoutMs: 200, killAll: () => new Promise(() => {}), kill: fakeKill() }),
+      /processes of user 10001 are still running: 41/
+    );
+    assert.ok(Date.now() - started < 5000, "it did not wait on the helper");
     await rm(proc, { recursive: true });
   });
 
@@ -175,13 +190,62 @@ describe("stopping the run's processes", () => {
     const exited = new Promise((resolve) => child.on("exit", (code, signal) => resolve(signal)));
     const { readFile } = await import("node:fs/promises");
     const leaderGone = async () => /^State:\s+Z/m.test(await readFile(`/proc/${child.pid}/status`, "utf8").catch(() => ""));
+    const beatNow = () => readFile(beat, "utf8").catch(() => "");
     await until(leaderGone);
     assert.ok(await leaderGone(), "the main thread exited");
+    // Before the stop: the other thread is really running, so its heartbeat moves.
+    let first = "";
+    await until(async () => (first = await beatNow()) !== "");
+    await until(async () => !["", first].includes(await beatNow()));
+    assert.notEqual(await beatNow(), first, "its other thread is running");
     assert.ok(await live(child.pid), "it is still alive, by its other thread");
     await stopUserProcesses(10001);
     assert.deepEqual(await processesOf(10001), []);
     // The kernel says so too: the whole process ended, by SIGKILL.
     assert.equal(await exited, "SIGKILL");
-    assert.ok((await readFile(beat, "utf8")).length > 0, "its other thread had been running");
   });
+
+  /**
+   * A process of the run's user that sends `signal` to every other process of that user it sees,
+   * as soon as it sees it: the kill helper included, since it runs as that user.
+   */
+  async function hunter(signal) {
+    const script = join(base, `hunter-${signal}.cjs`);
+    await writeFile(
+      script,
+      `const fs = require("fs");
+const me = process.pid;
+const seen = new Set();
+fs.writeFileSync(${JSON.stringify(join(base, `hunting-${signal}`))}, "yes");
+for (;;) {
+  for (const name of fs.readdirSync("/proc")) {
+    if (!/^\\d+$/.test(name) || Number(name) === me || seen.has(name)) continue;
+    try {
+      if (/^Uid:\\s+10001\\b/m.test(fs.readFileSync("/proc/" + name + "/status", "utf8"))) {
+        seen.add(name);
+        process.kill(Number(name), ${JSON.stringify(signal)});
+      }
+    } catch {}
+  }
+}
+`
+    );
+    execFileSync("chmod", ["a+rx", base, script]);
+    execFileSync("chmod", ["a+w", base]);
+    const child = spawn(process.execPath, [script], { uid: 10001, gid: 10001, detached: true, stdio: "ignore" });
+    const exited = new Promise((resolve) => child.on("exit", (code, sig) => resolve(sig)));
+    const { readFile } = await import("node:fs/promises");
+    await until(async () => (await readFile(join(base, `hunting-${signal}`), "utf8").catch(() => "")) === "yes");
+    return { child, exited };
+  }
+
+  for (const signal of ["SIGSTOP", "SIGKILL"]) {
+    it(`ends a process that sends ${signal} to the kill helper, and returns (R2.3-1)`, { skip: !root && "needs root, as in the Docker image" }, async () => {
+      const { child, exited } = await hunter(signal);
+      assert.ok(await live(child.pid), "the hunter is running");
+      await stopUserProcesses(10001);
+      assert.deepEqual(await processesOf(10001), []);
+      assert.equal(await exited, "SIGKILL");
+    });
+  }
 });

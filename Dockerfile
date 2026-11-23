@@ -8,7 +8,10 @@ ENV NODE_ENV=production \
 WORKDIR /app
 
 # tini as PID 1: it reaps orphaned processes (node does not), so a run's leftovers do not pile up
-# as zombies, and the worker's stop (server/reports.js) can tell them from live processes.
+# as zombies, and the worker's stop (server/reports.js) can tell them from live processes. -s makes
+# it a subreaper too, so it still reaps them if the host puts another init in front of it. When
+# the server exits, tini exits and the whole container stops, which the worker relies on when a
+# run's processes will not stop.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends tini \
  && rm -rf /var/lib/apt/lists/*
@@ -29,5 +32,5 @@ ENV RUN_AS_UID=10001 \
     RUN_AS_GID=10001
 USER root
 EXPOSE 10000
-ENTRYPOINT ["/usr/bin/tini", "--"]
+ENTRYPOINT ["/usr/bin/tini", "-s", "--"]
 CMD ["node", "server/index.js"]

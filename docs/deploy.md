@@ -285,9 +285,14 @@ domain only you control, where you can.
       server checks that `reports/` is still the folder it made: not a link, the same inode, the
       same owner;
     - before each run, before its reports are read, and when it ends on any path, the server
-      ends every process of that user. It kills them by user, not by pid (a helper running as
-      that user calls `kill(-1, SIGKILL)`), and waits until none has a live thread, so a
-      process whose main thread has exited is caught too;
+      ends every process of that user. Each pass kills every listed pid from root, which they
+      cannot block, and then everything of that user at once (a helper running as that user
+      calls `kill(-1, SIGKILL)`, and root ends the helper after a second if it is stopped). It
+      waits until none has a live thread, so a process whose main thread has exited is caught
+      too;
+    - **if that stop fails** (after 10 seconds), the run fails or goes back in the queue, the
+      server reads and deletes nothing of it, and it exits. With tini as PID 1 the whole
+      container then stops, which ends every process in it, and Render starts a fresh one;
     - it lists the folder without following links, and keeps regular files only;
     - it opens each file with `O_NOFOLLOW`, and checks the open handle: a regular file, owned by
       the run's user, with a single link (so not a hard link to another file), of at most 2 MiB.
@@ -296,9 +301,14 @@ domain only you control, where you can.
 
     So a link to `/proc/self/environ`, a folder swapped for a link, or a hard link never makes
     the server read a file the run could not.
-  - **PID 1** in the image is `tini` (`ENTRYPOINT ["/usr/bin/tini", "--"]`), which reaps
-    orphaned processes, so a run's leftovers do not pile up as zombies. It also passes Render's
-    SIGTERM on to the server, which then puts a run in progress back in the queue.
+  - **PID 1** in the image is `tini` (`ENTRYPOINT ["/usr/bin/tini", "-s", "--"]`), which reaps
+    orphaned processes, so a run's leftovers do not pile up as zombies (`-s` keeps it reaping
+    even if the host puts another init in front of it). It passes Render's SIGTERM on to the
+    server, which then puts a run in progress back in the queue, and it exits when the server
+    exits.
+  - **`RUN_AS_UID` must be a user nothing else uses** in the container: the server ends every
+    process of that user. The image's `runner` (10001) is used only by runs. Outside Docker, and
+    for the root-only tests, use a user of its own.
   - The run process that drives the browser gets only a short list of harmless variables (`PATH`,
     `HOME`, `TMPDIR`, the locale and time zone, `NODE_ENV` and `PLAYWRIGHT_BROWSERS_PATH`). It runs as `runner`, an unprivileged user, while the
     server runs as root. So even a page that breaks out of Chromium cannot read the server's

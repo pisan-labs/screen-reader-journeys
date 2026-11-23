@@ -59,7 +59,16 @@ export function summarizeRun({ results, blocked, outcome }, files, skipped = [])
   };
 }
 
-export function createWorker({ db, catalog, config, execute = executeRun, lookup, log = console, stopProcesses = (runAs) => stopUserProcesses(runAs.uid, { gid: runAs.gid }) }) {
+export function createWorker({
+  db,
+  catalog,
+  config,
+  execute = executeRun,
+  lookup,
+  log = console,
+  stopProcesses = (runAs) => stopUserProcesses(runAs.uid, { gid: runAs.gid }),
+  exit = (code) => process.exit(code),
+}) {
   let stopping = false;
   let loop = null;
   let current = null; // AbortController of the run in progress
@@ -171,6 +180,17 @@ export function createWorker({ db, catalog, config, execute = executeRun, lookup
     current = new AbortController();
     if (stopping) current.abort();
     let workDir = null;
+    // Set when a stop failed: a process of the run's user may still be running, so nothing of
+    // the run may be read or deleted any more (see finally).
+    let unsafe = false;
+    const stopOrMark = async () => {
+      try {
+        await stopRunProcesses();
+      } catch (error) {
+        unsafe = true;
+        throw error;
+      }
+    };
     try {
       log.log(`run ${run.id}: started (${run.base_url})`);
       // Check again: a user can insert a queued run straight into the table, past the API.
@@ -181,7 +201,7 @@ export function createWorker({ db, catalog, config, execute = executeRun, lookup
       if (!egress.ok) return await finish(run, { status: "failed", error: `Refused: ${egress.reason}.` });
 
       // A process left by an earlier run could otherwise write into this person's folder.
-      await stopRunProcesses();
+      await stopOrMark();
       const dirs = await makeWorkDir();
       workDir = dirs.workDir;
       const outDir = dirs.outDir;
@@ -202,7 +222,7 @@ export function createWorker({ db, catalog, config, execute = executeRun, lookup
         return;
       }
       // Nothing may write into the folder while it is read, and it must be the folder made for it.
-      await stopRunProcesses();
+      await stopOrMark();
       await checkReportsFolder(dirs.reports);
       const { saved: files, skipped } = await saveReports(run.id, outDir, { realRoot: dirs.reports.real, uid: dirs.reports.uid });
       await recordResults(run.id, outcome.results, files);
@@ -223,8 +243,22 @@ export function createWorker({ db, catalog, config, execute = executeRun, lookup
     } finally {
       current = null;
       // On every path (done, failed, aborted for a deploy): nothing of this run may outlive it.
-      await stopRunProcesses().catch((error) => log.error(`run ${run.id}: stopping its processes: ${error.message}`));
-      if (workDir) await rm(workDir, { recursive: true, force: true }).catch((error) => log.error(`run ${run.id}: removing its folder: ${error.message}`));
+      try {
+        await stopRunProcesses();
+      } catch (error) {
+        unsafe = true;
+        log.error(`run ${run.id}: stopping its processes: ${error.message}`);
+      }
+      if (unsafe) {
+        // A process of the run's user is still alive. Reading or deleting its folder as root
+        // now could be steered (a folder swapped for a link mid-walk), so do neither. The run is
+        // already failed or requeued. End the server: with tini as PID 1 the whole container
+        // stops, which ends every process in it, and the host starts a fresh one.
+        log.error(`run ${run.id}: a process of the run's user would not stop; leaving ${workDir ?? "its folder"} alone and exiting`);
+        exit(1);
+      } else if (workDir) {
+        await rm(workDir, { recursive: true, force: true }).catch((error) => log.error(`run ${run.id}: removing its folder: ${error.message}`));
+      }
     }
   }
 

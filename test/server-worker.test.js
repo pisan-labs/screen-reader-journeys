@@ -5,7 +5,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import dgram from "node:dgram";
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { link, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -417,21 +417,55 @@ describe("worker, with a fake run process", () => {
     assert.equal(fake.run(run.id).status, "done");
   });
 
-  it("fails the run, reading nothing, when the run's processes will not stop", async () => {
+  it("when the run's processes will not stop: fails the run, reads and deletes nothing, and ends the server (R2.3-2)", async () => {
     const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
     const fake = fakeSupabase({ runs: [run] });
     let stops = 0;
     const stopProcesses = async () => {
       if (++stops >= 2) throw new Error("processes of user 10001 are still running: 99");
     };
+    let workDir;
     const execute = async (job) => {
+      workDir = join(job.outDir, "..");
       await writeFile(join(job.outDir, "summary.md"), "# Summary");
       return { outcome: "done", error: null, results: [summary(BASIC, "walker")], blocked: [] };
     };
+    const exits = [];
+    const exit = (code) => exits.push([code, fake.run(run.id).status]);
     const own = { ...config, runAs: { uid: process.getuid(), gid: process.getgid() } };
-    await createWorker({ db: dbOf(fake), catalog, config: own, execute, lookup, log: quiet, stopProcesses }).tick();
-    assert.equal(fake.run(run.id).status, "failed");
-    assert.equal(fake.tables.run_reports.length, 0);
+    try {
+      await createWorker({ db: dbOf(fake), catalog, config: own, execute, lookup, log: quiet, stopProcesses, exit }).tick();
+      assert.equal(fake.run(run.id).status, "failed");
+      assert.equal(fake.tables.run_reports.length, 0);
+      assert.deepEqual(exits, [[1, "failed"]], "the server ends once, after the run is marked failed");
+      assert.ok(existsSync(join(workDir, "reports", "summary.md")), "the run's folder is left alone");
+    } finally {
+      await rm(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it("also ends the server when only the last stop fails, on a run put back for a deploy", async () => {
+    const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+    const fake = fakeSupabase({ runs: [run] });
+    let stops = 0;
+    const stopProcesses = async () => {
+      if (++stops === 2) throw new Error("processes of user 10001 are still running: 99");
+    };
+    let workDir;
+    const execute = async (job) => {
+      workDir = join(job.outDir, "..");
+      return { outcome: "aborted", error: null, results: [], blocked: [] };
+    };
+    const exits = [];
+    const own = { ...config, runAs: { uid: process.getuid(), gid: process.getgid() } };
+    try {
+      await createWorker({ db: dbOf(fake), catalog, config: own, execute, lookup, log: quiet, stopProcesses, exit: (code) => exits.push(code) }).tick();
+      assert.equal(fake.run(run.id).status, "queued", "requeued first");
+      assert.deepEqual(exits, [1]);
+      assert.ok(existsSync(workDir), "the run's folder is left alone");
+    } finally {
+      await rm(workDir, { recursive: true, force: true });
+    }
   });
 
   it("fails the run when saving a report fails for a reason other than a refusal (R2.3)", async () => {

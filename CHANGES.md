@@ -31,3 +31,5 @@ Append-only journal, oldest first. Earlier history: `git log` and `docs/handoff.
 2026-11-23 [code] Review of #11 round 2: the run's work folder stays root-owned, the reports folder is checked before reading, processes are killed by user (kill -1 as that user) and counted by thread, hard links are refused.
 
 2026-11-23 [decision] PManager: tini as PID 1 in the image (ENTRYPOINT ["/usr/bin/tini", "--"]), so orphaned zombies are reaped.
+
+2026-11-23 [code] Review of #11 round 3: the stop also kills each pid from root and limits the helper; a failed stop reads and deletes nothing and ends the server; tini -s.
