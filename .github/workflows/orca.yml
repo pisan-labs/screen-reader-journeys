@@ -3,7 +3,8 @@
 #
 # - On pull requests that touch the Orca code: the self-test (test/orca.test.js) against the
 #   fixture page.
-# - By hand (Actions tab): journeys against a site address, with the reports as an artifact.
+# - By hand (Actions tab), or called by another workflow: journeys against a site address, with
+#   the reports as an artifact.
 name: Orca
 
 on:
@@ -22,6 +23,19 @@ on:
       journeys:
         description: "Journey files or folders, separated by spaces"
         default: "targets/stem-accessibility"
+  # Called by the Compare screen readers workflow, or by another repository.
+  workflow_call:
+    inputs:
+      base_url:
+        type: string
+        required: true
+      journeys:
+        type: string
+        default: "targets/stem-accessibility"
+      tool_ref:
+        description: "Version of this tool to use"
+        type: string
+        default: "main"
 
 permissions:
   contents: read
@@ -31,7 +45,11 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
+      # When another repository calls this workflow, check out this tool, not the caller.
       - uses: actions/checkout@v4
+        with:
+          repository: pisan-labs/screen-reader-journeys
+          ref: ${{ inputs.tool_ref || github.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -46,24 +64,24 @@ jobs:
       - run: npx playwright install --with-deps chromium
       # The display and session bus are started first, so Orca and the browser share them.
       - name: Self-test with Orca
-        if: github.event_name == 'pull_request'
+        if: ${{ !inputs.base_url }}
         env:
           SRJ_ORCA: "1"
           DEBUG: "guidepup:*"
         run: xvfb-run -a dbus-run-session -- node --test test/orca.test.js
       - name: Run journeys with Orca
         id: run
-        if: github.event_name == 'workflow_dispatch'
+        if: inputs.base_url
         env:
           BASE_URL: ${{ inputs.base_url }}
           JOURNEYS: ${{ inputs.journeys }}
         run: xvfb-run -a dbus-run-session -- node src/cli.js run $JOURNEYS --base-url "$BASE_URL" --mode orca --out reports
         continue-on-error: true
       - name: Summary
-        if: always() && github.event_name == 'workflow_dispatch'
+        if: always() && inputs.base_url
         run: cat reports/summary.md >> "$GITHUB_STEP_SUMMARY" || true
       - uses: actions/upload-artifact@v4
-        if: always() && github.event_name == 'workflow_dispatch'
+        if: always() && inputs.base_url
         with:
           name: orca-reports
           path: reports

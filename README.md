@@ -46,6 +46,7 @@ and the transcript. The exit code is 1 if a journey failed.
 ```
 srj run [paths...] --base-url URL [--mode walker,virtual] [--format md,json,html] [--out reports] [--headed] [--fail-on error|warning|none]
 srj list [paths...]
+srj compare [reports...] [--out compare] [--format md,html,json]
 ```
 
 ## Report formats
@@ -62,6 +63,27 @@ Choose with `--format` (comma-separated; the default is `md,json,html`):
 | `csv` | `findings.csv`, `checks.csv` | Spreadsheets. Cells that would start a formula are prefixed with `'` |
 
 Page text is untrusted, so every format escapes it.
+
+## Comparing modes and sites
+
+When a journey runs in more than one mode, `srj run` also writes `compare.md` and `compare.html`:
+one table per journey, with a column per mode and a row per step, showing what each one heard.
+Each row lists its differences:
+
+- **silent in …**: a screen reader said nothing after Tab or Shift+Tab. Sometimes that is right
+  (focus went into `aria-hidden`); often it is a missing name or role.
+- **focus differs**: the runs were on different elements after the same step.
+- **missing in …**: a run has no such step, for example because it stopped early.
+
+`srj compare` does the same for runs made separately: on different machines (Orca on Linux, NVDA
+on Windows) or against two sites, such as `main` and a pull request's preview. Give it the
+report folders; it reads the JSON results, and links each column to that run's own report.
+
+```bash
+node src/cli.js compare reports-main reports-preview --out compare
+```
+
+See [an example](docs/examples/compare.walker-virtual.fixture.md).
 
 Paths are `*.journey.js` files, or folders to search; the default is `targets/`. `--fail-on
 error` also fails the run when a finding is an error, not only when a journey's checks fail.
@@ -100,6 +122,8 @@ hear changes.
 | `sr.expectAnnouncement(textOrRegExp, { within })` | Wait for a live-region announcement, or speech in virtual and voiceover modes |
 | `sr.walkTabOrder({ max })` | Tab through the whole page once, recording every stop |
 | `sr.readPage({ max })` | Read line by line, like a screen reader's "read next" (virtual and voiceover) |
+| `sr.expect(ok, text, detail)` | Record a check of your own, e.g. on `sr.page` or `sr.last` |
+| `sr.last` | The step just recorded: its `action`, what was `spoken`, and the `focus` |
 | `sr.note(text)` | Add a line to the transcript |
 | `sr.page` | The Playwright page, for anything else |
 
@@ -111,7 +135,8 @@ Chromium reports: `button`, `link`, `combobox`, `checkbox`, `heading` and so on.
 - [`targets/stem-accessibility`](targets/stem-accessibility): journeys for the
   [STEM-Accessibility](https://github.com/stem-accessibility/frontend) frontend. `mock.js` fakes
   its backend inside the browser, so journeys run against any build (a local dev server, or a
-  pull request's Vercel preview) without touching real data.
+  pull request's Vercel preview) without touching real data. A journey for a feature still in a
+  pull request names it in its description; on other builds it fails at the first missing step.
 - [`targets/generic`](targets/generic): works on any site (the home page's Tab order).
 
 ## In CI
@@ -131,6 +156,10 @@ Chromium reports: `button`, `link`, `combobox`, `checkbox`, `heading` and so on.
   registered as a self-hosted runner. See [docs/voiceover.md](docs/voiceover.md).
 - **NVDA** (`.github/workflows/nvda.yml`): real NVDA on a GitHub-hosted Windows runner, the same way:
   the self-test on pull requests that touch the NVDA code, journeys when started by hand.
+- **Compare screen readers** (`.github/workflows/compare.yml`): runs the journeys in the walker,
+  the emulated screen reader, Orca and NVDA, then compares them. Start it from the Actions tab
+  with a site address, or call it from another repository as above, with `compare.yml`. The
+  artifact `screen-reader-comparison` holds every run's reports and the comparison.
 - **Orca** (`.github/workflows/orca.yml`): real Orca on a GitHub-hosted Ubuntu 26.04 runner. It runs
   the Orca self-test on pull requests that touch the Orca code; start it by hand with a site address
   for journeys. Locally, on Ubuntu 26.04 or later:
