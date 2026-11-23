@@ -111,7 +111,8 @@ Chromium reports: `button`, `link`, `combobox`, `checkbox`, `heading` and so on.
 - [`targets/stem-accessibility`](targets/stem-accessibility): journeys for the
   [STEM-Accessibility](https://github.com/stem-accessibility/frontend) frontend. `mock.js` fakes
   its backend inside the browser, so journeys run against any build (a local dev server, or a
-  pull request's Vercel preview) without touching real data.
+  pull request's Vercel preview) without touching real data. A journey for a feature still in a
+  pull request names it in its description; on other builds it fails at the first missing step.
 - [`targets/generic`](targets/generic): works on any site (the home page's Tab order).
 
 ## In CI

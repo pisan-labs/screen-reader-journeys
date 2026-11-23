@@ -1,0 +1,23 @@
+{
+  "public_slug": "srj-demo-math",
+  "title": "Lab 3: Sums",
+  "short_alt": "Flowchart of a loop that adds the numbers from 1 to n.",
+  "summary": "## Overview\n\nA loop that adds the whole numbers from 1 to $n$.\n\n## Result\n\nWhen the loop ends, the total is\n\n$$\\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}$$\n\n## Steps\n\n- Start with $s = 0$ and $i = 1$\n- Add $i$ to $s$, then add 1 to $i$\n- Stop when $i > n$",
+  "has_image": false,
+  "flowchart_type": "flowchart",
+  "published_at": "2026-11-01T12:00:00Z",
+  "json_data": {
+    "nodes": [
+      { "id": "A", "label": "Start", "shape": "ellipse", "coordinates": [[100, 0], [200, 40]] },
+      { "id": "B", "label": "i > n?", "shape": "diamond", "coordinates": [[100, 100], [200, 160]] },
+      { "id": "C", "label": "Add i to s", "shape": "rectangle", "coordinates": [[220, 240], [320, 280]] },
+      { "id": "D", "label": "End", "shape": "ellipse", "coordinates": [[0, 240], [80, 280]] }
+    ],
+    "edges": [
+      { "source": "A", "destination": "B", "type": "solid", "arrowheads": ["end"] },
+      { "source": "B", "destination": "D", "type": "solid", "label": "Yes", "arrowheads": ["end"] },
+      { "source": "B", "destination": "C", "type": "solid", "label": "No", "arrowheads": ["end"] },
+      { "source": "C", "destination": "B", "type": "solid", "arrowheads": ["end"] }
+    ]
+  }
+}

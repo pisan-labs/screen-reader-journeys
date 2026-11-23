@@ -1,0 +1,25 @@
+{
+  "slug": "srj-demo-chart",
+  "title": "Daily high temperature",
+  "dataset": {
+    "name": "week-temperatures.csv",
+    "columns": ["day", "high_c"],
+    "rows": [
+      { "day": 1, "high_c": 12 },
+      { "day": 2, "high_c": 14 },
+      { "day": 3, "high_c": 11 },
+      { "day": 4, "high_c": 16 },
+      { "day": 5, "high_c": 18 }
+    ]
+  },
+  "config": {
+    "preset": "line",
+    "timeColumn": "day",
+    "valueColumn": "high_c",
+    "categoryColumn": null,
+    "title": "Daily high temperature",
+    "xLabel": "Day",
+    "yLabel": "High temperature"
+  },
+  "spec": null
+}
