@@ -22,6 +22,11 @@
     a fresh Reviewer and releases.
   - No top-tier model for any subagent in this project.
   - Times for the owner are in Barcelona time (Europe/Madrid), labelled, until 6 January 2027.
+- **23 Nov 2026, owner:** the worker runs in a Render service of its own, on the free plan;
+  PManager generates `WORKER_TOKEN` and pins its hash at release; TypeScript for the dashboard,
+  `tsc --checkJs` for the server and the CLI.
+- **Proposed, not yet confirmed by the owner:** retention of each person's 20 latest runs, and
+  deletion of finished runs after 30 days; per run, at most 200 report files and 20 MiB.
 - **23 Nov 2026:** the MIT licence (owner's choice).
 
 ## Non-goals

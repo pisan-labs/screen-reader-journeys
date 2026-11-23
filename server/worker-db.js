@@ -21,6 +21,9 @@ export function workerDb(client, token) {
     /** Fail runs still running that started more than `seconds` ago. Resolves to how many. */
     failStaleRuns: (seconds) => call("worker_fail_stale_runs", { p_older_than_seconds: Math.max(60, Math.ceil(seconds)) }),
 
+    /** Delete finished runs over 30 days old (retention). Resolves to how many. */
+    pruneRuns: () => call("worker_prune_runs"),
+
     /** Claim the oldest queued run and mark it running. Resolves to the run, or null. */
     async claim() {
       const data = await call("worker_claim_next_run");

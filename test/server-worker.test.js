@@ -292,6 +292,51 @@ describe("worker, with a fake run process", () => {
     assert.deepEqual(fake.tables.run_reports.map((r) => r.path), ["summary.md"]);
     assert.deepEqual(saved.summary.files, ["summary.md"]);
     assert.deepEqual(saved.summary.skipped_files, ["core.bin", "huge.json"]);
+    assert.ok(!fake.calls.some((c) => c.name === "worker_save_report" && c.args.p_path === "huge.json"), "the large file is never sent");
+  });
+
+  it("keeps a report whose text has NUL characters, with U+FFFD in their place", async () => {
+    const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+    const fake = fakeSupabase({ runs: [run] });
+    const execute = async (job) => {
+      await writeFile(join(job.outDir, "summary.md"), "| Tab | a\u0000b, button |");
+      return { outcome: "done", error: null, results: [summary(BASIC, "walker")], blocked: [] };
+    };
+    await createWorker({ db: dbOf(fake), catalog, config, execute, lookup, log: quiet }).tick();
+    assert.equal(fake.run(run.id).status, "done");
+    assert.equal(fake.report(run.id, "summary.md").body, "| Tab | a\uFFFDb, button |");
+  });
+
+  it("leaves out a file the database refuses or could not name, and still finishes the run", async () => {
+    const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+    const fake = fakeSupabase({ runs: [run] });
+    fake.failures.push({ op: "rpc", name: "worker_save_report", error: { message: "A run keeps at most 20 MiB of reports." } });
+    const execute = async (job) => {
+      await writeFile(join(job.outDir, "a.md"), "first, refused");
+      await writeFile(join(job.outDir, "b.md"), "second, kept");
+      await writeFile(join(job.outDir, ".hidden.md"), "not a name the table takes");
+      await writeFile(join(job.outDir, `${"x".repeat(198)}.md`), "too long a name");
+      return { outcome: "done", error: null, results: [summary(BASIC, "walker")], blocked: [] };
+    };
+    const logged = [];
+    await createWorker({ db: dbOf(fake), catalog, config, execute, lookup, log: { log: (line) => logged.push(line), error() {} } }).tick();
+    const saved = fake.run(run.id);
+    assert.equal(saved.status, "done");
+    assert.deepEqual(saved.summary.files, ["b.md"]);
+    assert.deepEqual(saved.summary.skipped_files.sort(), [".hidden.md", "a.md", `${"x".repeat(198)}.md`].sort());
+    assert.ok(logged.some((line) => /left out a\.md \(worker_save_report: A run keeps at most 20 MiB/.test(line)), logged.join("\n"));
+    assert.equal(fake.tables.run_results.length, 1, "the results are kept");
+  });
+
+  it("deletes finished runs over 30 days old, about once an hour", async () => {
+    const old = queued({ base_url: `https://${HOST}/`, journeys: [BASIC], status: "done", finished_at: new Date(Date.now() - 31 * 24 * 3600 * 1000).toISOString() });
+    const recent = queued({ base_url: `https://${HOST}/`, journeys: [BASIC], status: "done", finished_at: new Date().toISOString() });
+    const fake = fakeSupabase({ runs: [old, recent] });
+    const worker = createWorker({ db: dbOf(fake), catalog, config, execute: executeNothing, lookup, log: quiet });
+    await worker.tick();
+    await worker.tick();
+    assert.deepEqual(fake.tables.runs.map((r) => r.id), [recent.id]);
+    assert.equal(fake.calls.filter((c) => c.name === "worker_prune_runs").length, 1, "not on every tick");
   });
 
   it("stops saving reports when the run has been deleted", async () => {

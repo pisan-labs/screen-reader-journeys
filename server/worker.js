@@ -13,6 +13,12 @@ import { validateRunRequest } from "./validate.js";
 /** A report larger than this is left out (the database refuses it); the summary says so. */
 export const MAX_REPORT_BYTES = 2 * 1024 * 1024;
 
+/** The report paths the database takes (run_reports.path's check). */
+const REPORT_PATH = /^[A-Za-z0-9][A-Za-z0-9._-]*(\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/;
+
+/** How often the worker deletes finished runs over 30 days old. */
+const PRUNE_EVERY_MS = 60 * 60 * 1000;
+
 /** A run still "running" this long after its timeout belonged to a server that stopped. */
 const STALE_GRACE_MS = 10 * 60 * 1000;
 
@@ -67,19 +73,44 @@ export function createWorker({ db, catalog, config, execute = executeRun, lookup
     log.log(`run ${run.id}: ${fields.status}${fields.error ? ` (${fields.error})` : ""}`);
   }
 
-  /** Save each report file the run wrote. Resolves to the saved paths and the ones left out. */
+  /**
+   * Save each report file the run wrote. Resolves to the saved paths and the ones left out. A
+   * file the database will not take is left out, never a reason to fail a run that finished.
+   * The run's process wrote these files, so they are not trusted: a file's size is checked
+   * before it is read, and its name before it is sent.
+   */
   async function saveReports(runId, dir) {
     const saved = [];
     const skipped = [];
+    const leaveOut = (file, why) => {
+      skipped.push(file);
+      log.log(`run ${runId}: left out ${file} (${why})`);
+    };
     for (const file of await listFiles(dir)) {
       const type = CONTENT_TYPES[extname(file)];
-      const body = type ? await readFile(join(dir, file), "utf8") : null;
-      if (!type || Buffer.byteLength(body) > MAX_REPORT_BYTES) {
-        skipped.push(file);
-        log.log(`run ${runId}: left out ${file} (${type ? "too large" : "not a report type"})`);
+      if (!type) {
+        leaveOut(file, "not a report type");
         continue;
       }
-      if (!(await db.saveReport(runId, file, type, body))) break; // the run was deleted
+      if (file.length > 200 || !REPORT_PATH.test(file)) {
+        leaveOut(file, "a name the database does not take");
+        continue;
+      }
+      if ((await stat(join(dir, file))).size > MAX_REPORT_BYTES) {
+        leaveOut(file, "too large");
+        continue;
+      }
+      // A text column cannot hold U+0000, which a tested page can put in an accessible name;
+      // replace it as an HTML parser would.
+      const body = (await readFile(join(dir, file), "utf8")).replaceAll("\u0000", "\uFFFD");
+      let kept;
+      try {
+        kept = await db.saveReport(runId, file, type, body);
+      } catch (error) {
+        leaveOut(file, error.message);
+        continue;
+      }
+      if (!kept) break; // the run was deleted
       saved.push(file);
     }
     return { saved, skipped };
@@ -173,9 +204,19 @@ export function createWorker({ db, catalog, config, execute = executeRun, lookup
     }
   }
 
+  let prunedAt = 0;
+  /** Retention, about once an hour: a failure is logged and tried again at the next tick. */
+  async function prune() {
+    if (Date.now() - prunedAt < PRUNE_EVERY_MS) return;
+    const count = await db.pruneRuns();
+    prunedAt = Date.now();
+    if (count) log.log(`pruned ${count} finished runs over 30 days old`);
+  }
+
   /** Claim and process one run. Resolves to true if there was one. */
   async function tick() {
     await failStaleRuns();
+    await prune();
     if (stopping) return false; // do not claim a run this server would have to give back
     const run = await db.claim();
     if (!run) return false;

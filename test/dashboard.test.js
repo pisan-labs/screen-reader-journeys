@@ -60,7 +60,7 @@ after(async () => {
 });
 
 /** Answer Supabase and the API inside the browser, as targets/stem-accessibility/mock.js does for its backend. */
-async function fakeBackend(page, { signedIn, posted = [] }) {
+async function fakeBackend(page, { signedIn, posted = [], reportReads = [] }) {
   if (signedIn) {
     const session = { access_token: "header.payload.signature", refresh_token: "refresh", token_type: "bearer", expires_in: 3600, expires_at: Math.floor(Date.now() / 1000) + 3600, user: USER };
     await page.addInitScript(([key, value]) => localStorage.setItem(key, value), ["sb-auth-auth-token", JSON.stringify(session)]);
@@ -95,8 +95,11 @@ async function fakeBackend(page, { signedIn, posted = [] }) {
     if (pathname.startsWith("/rest/v1/") && request.headers()["accept-profile"] !== "app_screen_reader_journeys") return json(route, { message: "wrong schema" }, 406);
     if (pathname === "/rest/v1/runs") return json(route, posted.length ? [{ id: RUN_ID, base_url: "https://preview.vercel.app/", status: "queued", created_at: "2026-11-23T10:00:00Z", summary: null }] : []);
     if (pathname === "/rest/v1/run_reports") {
-      const paths = /^in\.\((.*)\)$/.exec(new URL(request.url()).searchParams.get("path") ?? "")?.[1].split(",").map((p) => p.replace(/^"|"$/g, "")) ?? [];
-      return json(route, paths.map((path) => ({ path, content_type: "text/markdown; charset=utf-8", body: `# ${path}` })));
+      const query = new URL(request.url()).searchParams;
+      const paths = /^in\.\((.*)\)$/.exec(query.get("path") ?? "")?.[1].split(",").map((p) => p.replace(/^"|"$/g, "")) ?? [];
+      const withBody = /body/.test(query.get("select") ?? "");
+      reportReads.push(query.get("select"));
+      return json(route, paths.map((path) => (withBody ? { path, body: `# ${path}` } : { path, content_type: "text/markdown; charset=utf-8" })));
     }
     return json(route, { message: `unexpected ${pathname}` }, 404);
   });
@@ -140,11 +143,12 @@ const signIn = {
 };
 
 const posted = [];
+const reportReads = [];
 const startRun = {
   name: "Dashboard: start a run and read its results",
   start: "/index.html",
   ready: "#base-url",
-  setup: (page) => fakeBackend(page, { signedIn: true, posted }),
+  setup: (page) => fakeBackend(page, { signedIn: true, posted, reportReads }),
   async run(sr) {
     await sr.walkTabOrder();
     await sr.tabTo({ role: "button", name: "Start run" });
@@ -159,7 +163,9 @@ const startRun = {
     await sr.expectAnnouncement("Run queued.");
     await sr.expectFocus({ role: "heading", name: /^Run/ });
     await sr.expectAnnouncement(/The run finished: 1 passed, 0 failed, 0 errors\./, { within: 12000 });
-    await sr.tabTo({ role: "link", name: "Download the report for Home page: Tab order, Keyboard walker" });
+    await sr.tabTo({ role: "button", name: "Download the report for Home page: Tab order, Keyboard walker" });
+    await sr.activate({ expectDownload: "home-page-tab-order.walker.md" });
+    await sr.expectAnnouncement("Downloaded home-page-tab-order.walker.md.");
     await sr.walkTabOrder();
   },
 };
@@ -181,6 +187,7 @@ describe("dashboard accessibility", () => {
     const result = await runJourney({ ...startRun, file: "test/dashboard.test.js" }, { mode: "walker", baseUrl: site.url });
     assertAccessible(result);
     assert.deepEqual(posted, [{ base_url: "https://preview.vercel.app", journeys: [HOME], modes: ["walker", "virtual"] }]);
+    assert.deepEqual(reportReads, ["path,content_type", "path,body"], "names to draw the page, then one body on request");
     const heard = result.steps.flatMap((s) => s.spoken).join(" / ");
     assert.match(heard, /Skip to main content, link/);
     assert.match(heard, /reviewer@example\.org/);

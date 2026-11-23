@@ -19,6 +19,10 @@ grant usage on schema auth to anon, authenticated, service_role;
 create table auth.users (id uuid primary key, email text);
 
 -- As in Supabase: the user id from the JWT claims PostgREST puts in request.jwt.claims.
+-- An empty setting (left by an earlier transaction's set_config(..., true)) means nobody.
 create function auth.uid() returns uuid language sql stable as $$
-  select nullif(coalesce(current_setting('request.jwt.claim.sub', true), current_setting('request.jwt.claims', true)::jsonb ->> 'sub'), '')::uuid
+  select coalesce(
+    nullif(current_setting('request.jwt.claim.sub', true), ''),
+    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
+  )::uuid
 $$;

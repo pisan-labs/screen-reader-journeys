@@ -63,12 +63,16 @@ function fakeClient({ runs = [] as Run[], runsError = null as string | null, rep
         };
       }
       return {
-        select: () => ({
+        select: (columns: string) => ({
           eq: (_c: string, runId: string) => ({
             in: async (_p: string, paths: string[]) => {
-              calls.push(`reports ${runId} ${paths.join(',')}`);
+              calls.push(`reports ${columns} ${runId} ${paths.join(',')}`);
               if (reportsError) return { data: null, error: { message: reportsError } };
-              return { data: paths.map((path) => ({ path, content_type: 'text/markdown', body: `# ${path}` })), error: null };
+              const missing = paths.filter((p) => p.startsWith('gone'));
+              return {
+                data: paths.filter((p) => !missing.includes(p)).map((path) => (columns.includes('body') ? { path, body: `<script>alert(1)</script> ${path}` } : { path, content_type: 'text/html' })),
+                error: null,
+              };
             },
           }),
         }),
@@ -170,6 +174,7 @@ describe('the dashboard', () => {
     await setup({ answers: { 'GET /journeys': { status: 200, body: CATALOG } } });
     await until(() => !!document.getElementById('base-url'), 'the form');
     expect(view().textContent).toMatch(/You have not started any runs yet/);
+    expect(document.getElementById('start-hint')!.textContent).toMatch(/waits about a minute while it wakes/);
     expect(view().textContent).toMatch(/This server may test \*\.vercel\.app/);
     const boxes = [...view().querySelectorAll<HTMLInputElement>('input[type=checkbox]')];
     expect(boxes.map((b) => [b.value, b.checked])).toEqual([
@@ -329,18 +334,63 @@ describe('the dashboard', () => {
       },
     });
     expect(view().textContent).toMatch(/Results appear here when the run finishes/);
+    expect(document.getElementById('sleep-note')!.textContent).toMatch(/takes about a minute to wake.*goes back in the queue/);
     await until(() => statusText().startsWith('The run finished'), 'the end');
     expect(statusText()).toBe('The run finished: 1 passed, 0 failed, 0 errors.');
     expect(view().querySelector('h1')?.textContent).toBe('Run on preview.vercel.app');
     expect(document.title).toBe('Run on preview.vercel.app – Screen Reader Journeys');
-    expect(calls.at(-1)).toBe(`reports ${RUN_ID} home-page-tab-order.walker.md,summary.md`);
-    const link = [...view().querySelectorAll('a')].find((a) => a.textContent?.startsWith('Download'))!;
-    expect(link.textContent).toBe('Download the report for Home page: Tab order, Keyboard walker');
-    expect(link.getAttribute('href')).toBe('blob:report');
-    expect(link.getAttribute('download')).toBe('home-page-tab-order.walker.md');
+    // Only the names and types to draw the page; no report body yet.
+    expect(calls.filter((c) => c.startsWith('reports'))).toEqual([`reports path, content_type ${RUN_ID} home-page-tab-order.walker.md,summary.md`]);
+    const button = [...view().querySelectorAll('button')].find((b) => b.textContent?.startsWith('Download'))!;
+    expect(button.textContent).toBe('Download the report for Home page: Tab order, Keyboard walker');
+    expect(view().textContent).not.toMatch(/The server sleeps/);
     expect(view().textContent).toMatch(/Files left out.*huge\.json/);
     expect(view().textContent).toMatch(/Blocked requests.*10\.0\.0\.1:80/);
     expect(view().textContent).toMatch(/2 of 2.*1 error, 0 warnings/);
+  });
+
+  it('fetches a report only when asked, and saves it as a download, never as a page', async () => {
+    const created: Blob[] = [];
+    (URL.createObjectURL as unknown as ReturnType<typeof vi.fn>).mockImplementation((blob: Blob) => {
+      created.push(blob);
+      return 'blob:report';
+    });
+    const clicked: { href: string; download: string }[] = [];
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      clicked.push({ href: this.getAttribute('href')!, download: this.getAttribute('download')! });
+    });
+    vi.useFakeTimers({ toFake: ['setTimeout'], shouldAdvanceTime: true });
+    const { calls } = await setup({ hash: `#/runs/${RUN_ID}`, answers: { [`GET /runs/${RUN_ID}`]: { status: 200, body: { run: run({ summary: { files: ['summary.html', 'gone.md'] } }) } } } });
+    const buttons = [...view().querySelectorAll<HTMLButtonElement>('.files button')];
+    expect(buttons.map((b) => b.textContent)).toEqual(['summary.html']);
+    expect(view().textContent).toMatch(/gone\.md/);
+    buttons[0].click();
+    await until(() => clicked.length === 1, 'the download');
+    expect(calls.at(-1)).toBe(`reports path, body ${RUN_ID} summary.html`);
+    expect(clicked[0]).toEqual({ href: 'blob:report', download: 'summary.html' });
+    expect(created[0].type).toBe('application/octet-stream');
+    const text = await new Promise<string>((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.readAsText(created[0]);
+    });
+    expect(text).toContain('<script>');
+    expect(document.querySelectorAll('a[hidden]')).toHaveLength(0);
+    await until(() => statusText() === 'Downloaded summary.html.', 'the announcement');
+    vi.advanceTimersByTime(10_000);
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:report');
+    vi.useRealTimers();
+    click.mockRestore();
+  });
+
+  it('says when a report cannot be downloaded', async () => {
+    const client = fakeClient();
+    await setup({ hash: `#/runs/${RUN_ID}`, client, answers: { [`GET /runs/${RUN_ID}`]: { status: 200, body: { run: run({ summary: { files: ['summary.md'] } }) } } } });
+    const original = client.client.from;
+    (client.client as { from: unknown }).from = (table: string) =>
+      table === 'run_reports' ? { select: () => ({ eq: () => ({ in: async () => ({ data: [], error: null }) }) }) } : (original as (t: string) => unknown)(table);
+    [...view().querySelectorAll<HTMLButtonElement>('.files button')][0].click();
+    await until(() => alertText().includes('The report could not be downloaded: it is no longer there'), 'the error');
   });
 
   it('shows a failed run, and one with no results', async () => {

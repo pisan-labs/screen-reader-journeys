@@ -66,8 +66,8 @@ select test.check(
     where p.pronamespace = 'app_screen_reader_journeys'::regnamespace and p.prosecdef),
   'every security definer function has search_path ''''');
 select test.check(
-  (select count(*) from pg_proc p where p.pronamespace = 'app_screen_reader_journeys'::regnamespace and p.prosecdef) = 8,
-  'eight security definer functions');
+  (select count(*) from pg_proc p where p.pronamespace = 'app_screen_reader_journeys'::regnamespace and p.prosecdef) = 9,
+  'nine security definer functions');
 select test.check(
   (select bool_and(not has_function_privilege('authenticated', p.oid, 'execute')) from pg_proc p
     where p.pronamespace = 'app_screen_reader_journeys'::regnamespace),
@@ -75,8 +75,8 @@ select test.check(
 select test.check(
   (select array_agg(p.proname::text order by p.proname) from pg_proc p
     where p.pronamespace = 'app_screen_reader_journeys'::regnamespace and has_function_privilege('anon', p.oid, 'execute'))
-  = array['worker_add_results', 'worker_claim_next_run', 'worker_fail_stale_runs', 'worker_finish_run', 'worker_requeue_run', 'worker_save_report'],
-  'anon may call exactly the six worker functions');
+  = array['worker_add_results', 'worker_claim_next_run', 'worker_fail_stale_runs', 'worker_finish_run', 'worker_prune_runs', 'worker_requeue_run', 'worker_save_report'],
+  'anon may call exactly the seven worker functions');
 
 \echo 'people queue runs with only the allowed columns, status queued, for themselves'
 begin;
@@ -187,6 +187,10 @@ select test.fails($$select app_screen_reader_journeys.worker_requeue_run('nope-n
 select test.fails($$select app_screen_reader_journeys.worker_save_report('nope-nope-nope-nope-nope-nope-nope-nope', gen_random_uuid(), 'a.md', 'text/markdown', 'x')$$, 'bad worker token');
 select test.fails($$select app_screen_reader_journeys.worker_add_results('nope-nope-nope-nope-nope-nope-nope-nope', gen_random_uuid(), '[]')$$, 'bad worker token');
 select test.fails($$select app_screen_reader_journeys.worker_finish_run('nope-nope-nope-nope-nope-nope-nope-nope', gen_random_uuid(), 'done', null, null)$$, 'bad worker token');
+select test.fails($$select app_screen_reader_journeys.worker_prune_runs('nope-nope-nope-nope-nope-nope-nope-nope')$$, 'bad worker token');
+-- The right token with a space in it, or past 200 characters: refused like the server refuses it.
+select test.fails($$select app_screen_reader_journeys.worker_prune_runs(test.token() || ' ')$$, 'bad worker token');
+select test.fails($$select app_screen_reader_journeys.worker_prune_runs(repeat('x', 201))$$, 'bad worker token');
 commit;
 
 \echo 'worker_claim_next_run takes the oldest queued run and marks it running'
@@ -210,12 +214,27 @@ select test.check(app_screen_reader_journeys.worker_save_report(test.token(), :'
 select test.fails(format($$select app_screen_reader_journeys.worker_save_report(test.token(), %L, '../etc/passwd', 'text/plain', 'x')$$, :'run_a'), 'check constraint');
 select test.fails(format($$select app_screen_reader_journeys.worker_save_report(test.token(), %L, '/abs.md', 'text/plain', 'x')$$, :'run_a'), 'check constraint');
 select test.check(not app_screen_reader_journeys.worker_save_report(test.token(), :'run_queued', 'summary.md', 'text/markdown', 'x'), 'a queued run takes no reports');
+select test.fails(format($$select app_screen_reader_journeys.worker_add_results(test.token(), %L, '[{"journey": "x", "mode": "voiceover", "status": "pass"}]')$$, :'run_a'), 'check constraint');
 select test.check(app_screen_reader_journeys.worker_add_results(test.token(), :'run_a',
   '[{"journey": "targets/generic/home-tab-order.journey.js", "mode": "walker", "status": "pass", "checks_passed": 1, "checks_total": 1, "errors": 0, "warnings": 2, "report_path": "home-page-tab-order.walker.md"}]') = 1, 'one result added');
 select test.check(app_screen_reader_journeys.worker_add_results(test.token(), :'run_queued', '[{"journey": "x", "mode": "walker", "status": "pass"}]') = 0, 'a queued run takes no results');
 select test.fails($$select app_screen_reader_journeys.worker_add_results(test.token(), gen_random_uuid(), '{}')$$, 'json array');
-select test.fails(format($$select app_screen_reader_journeys.worker_add_results(test.token(), %L, '[{"journey": "x", "mode": "voiceover", "status": "pass"}]')$$, :'run_a'), 'check constraint');
 commit;
+\echo 'per run: at most one result per journey and mode, 200 files and 20 MiB of reports'
+begin;
+select test.act_as('anon');
+-- run_a has 1 journey and 1 mode, and already has its one result.
+select test.fails(format($$select app_screen_reader_journeys.worker_add_results(test.token(), %L, '[{"journey": "x", "mode": "walker", "status": "pass"}]')$$, :'run_a'), 'one result per journey and mode');
+select test.fails(format($$select app_screen_reader_journeys.worker_save_report(test.token(), %L, 'big.md', 'text/markdown', repeat('x', 2097153))$$, :'run_a'), 'check constraint');
+select app_screen_reader_journeys.worker_save_report(test.token(), :'run_a', 'f' || n || '.md', 'text/plain', repeat('x', 2097152)) from generate_series(1, 9) n;
+select test.fails(format($$select app_screen_reader_journeys.worker_save_report(test.token(), %L, 'f10.md', 'text/plain', repeat('x', 2097152))$$, :'run_a'), 'at most 20 MiB');
+select test.check(app_screen_reader_journeys.worker_save_report(test.token(), :'run_a', 'f9.md', 'text/plain', 'smaller now'), 'replacing a file counts its new size, not the old');
+rollback;
+begin;
+select test.act_as('anon');
+select app_screen_reader_journeys.worker_save_report(test.token(), :'run_a', 'n' || n || '.md', 'text/plain', 'x') from generate_series(1, 198) n;
+select test.fails(format($$select app_screen_reader_journeys.worker_save_report(test.token(), %L, 'one-too-many.md', 'text/plain', 'x')$$, :'run_a'), 'at most 200 report files');
+rollback;
 select test.check((select count(*) from run_reports) = 2, 'two report files');
 select test.check((select body from run_reports where path = 'summary.md') = '# Summary, again', 'the replaced report');
 select test.check((select bool_and(user_id = '00000000-0000-4000-8000-00000000000a') from run_reports), 'reports belong to the run''s owner');
@@ -268,6 +287,30 @@ delete from runs where base_url = 'https://a.vercel.app/';
 select test.check((select count(*) from runs) = 2, 'A has 2 runs left');
 commit;
 select test.check((select count(*) from run_results) = 0 and (select count(*) from run_reports) = 0, 'results and reports went with the run');
+
+\echo 'retention: finished runs over 30 days old are pruned, and each person keeps their 20 latest runs'
+insert into auth.users (id, email) values ('00000000-0000-4000-8000-00000000000e', 'e@example.org');
+insert into runs (user_id, base_url, journeys, modes, status, created_at, finished_at)
+  select '00000000-0000-4000-8000-00000000000e', 'https://old-' || n || '.vercel.app/', '{x}', '{walker}', 'done',
+         now() - make_interval(days => 40 - n) + interval '12 hours', now() - make_interval(days => 40 - n) + interval '12 hours'
+    from generate_series(1, 22) n;
+begin;
+select test.act_as('anon');
+-- Finished 39.5 to 30.5 days ago: 9 runs (the next is 29.5 days old).
+select test.check(x.pruned = 9, 'nine runs finished over 30 days ago, pruned ' || x.pruned) from (select app_screen_reader_journeys.worker_prune_runs(test.token()) as pruned) x;
+commit;
+select test.check((select count(*) from runs where user_id = '00000000-0000-4000-8000-00000000000e') = 13, '13 left');
+insert into runs (user_id, base_url, journeys, modes, status, created_at, finished_at)
+  select '00000000-0000-4000-8000-00000000000e', 'https://new-' || n || '.vercel.app/', '{x}', '{walker}', 'done', now() - make_interval(mins => 30 - n), now()
+    from generate_series(1, 7) n;
+begin;
+select test.act_as('authenticated', '00000000-0000-4000-8000-00000000000e');
+insert into runs (base_url, journeys, modes) values ('https://latest.vercel.app/', '{x}', '{walker}');
+commit;
+select test.check((select count(*) from runs where user_id = '00000000-0000-4000-8000-00000000000e') = 20, 'the person keeps 20 runs');
+select test.check(exists (select 1 from runs where base_url = 'https://latest.vercel.app/'), 'the new run is kept');
+select test.check(not exists (select 1 from runs where base_url = 'https://old-10.vercel.app/'), 'the oldest run went');
+select test.check((select count(*) from runs where user_id = '00000000-0000-4000-8000-00000000000b') = 1, 'nobody else''s runs went');
 
 \echo 'deleting an account deletes everything it owns'
 begin;

@@ -10,6 +10,12 @@
 --                     pinned by a separate ops SQL file after the owner's yes, never here.
 --   anonymous         nothing else
 --
+-- Limits (proposed; the owner may change them):
+--   per run     at most 200 report files and 20 MiB of reports in all (2 MiB each), and at
+--               most one result per journey and mode
+--   retention   each person keeps their 20 latest runs; finished runs older than 30 days are
+--               deleted (worker_prune_runs, which the worker calls about once an hour)
+--
 -- No service-role key anywhere. Idempotent: a second run changes nothing.
 
 create schema if not exists app_screen_reader_journeys;
@@ -40,6 +46,7 @@ comment on table app_screen_reader_journeys.runs is 'Screen reader journey runs.
 create index if not exists runs_queued_idx on app_screen_reader_journeys.runs (created_at) where status = 'queued';
 create index if not exists runs_running_idx on app_screen_reader_journeys.runs (started_at) where status = 'running';
 create index if not exists runs_user_id_idx on app_screen_reader_journeys.runs (user_id, created_at desc);
+create index if not exists runs_finished_idx on app_screen_reader_journeys.runs (finished_at) where status in ('done', 'failed');
 
 -- Results: one row per journey and mode ----------------------------------------------------
 
@@ -148,6 +155,17 @@ begin
     raise exception 'You already have 3 runs waiting or running. Try again when one finishes.'
       using errcode = '53400';
   end if;
+  -- Retention: with this new run, the person keeps their 20 latest runs. Older finished runs
+  -- go, with their results and reports (on delete cascade).
+  delete from app_screen_reader_journeys.runs r
+   where r.user_id = new.user_id
+     and r.status in ('done', 'failed')
+     and r.id not in (
+           select k.id from app_screen_reader_journeys.runs k
+            where k.user_id = new.user_id
+            order by k.created_at desc, k.id desc
+            limit 19
+         );
   return new;
 end;
 $$;
@@ -169,7 +187,8 @@ security definer
 set search_path = ''
 as $$
 begin
-  if p_token is null or char_length(p_token) not between 32 and 200
+  -- 32 to 200 printable ASCII characters, as the server's config.js requires.
+  if p_token is null or p_token !~ '^[!-~]{32,200}$'
      or not exists (
        select 1 from app_screen_reader_journeys.worker_config c
         where c.token_sha256 = pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(p_token, 'UTF8')), 'hex')
@@ -231,6 +250,27 @@ begin
 end;
 $$;
 
+-- Retention: delete finished runs that finished more than 30 days ago, with their results and
+-- reports. Returns how many.
+create or replace function app_screen_reader_journeys.worker_prune_runs(p_token text)
+returns integer
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+declare
+  v_count integer;
+begin
+  perform app_screen_reader_journeys.worker_token_ok(p_token);
+  delete from app_screen_reader_journeys.runs r
+   where r.status in ('done', 'failed')
+     and r.finished_at < pg_catalog.now() - interval '30 days';
+  get diagnostics v_count = row_count;
+  return v_count;
+end;
+$$;
+
 -- Put a running run back in the queue (the worker is shutting down).
 create or replace function app_screen_reader_journeys.worker_requeue_run(p_token text, p_run_id uuid)
 returns boolean
@@ -248,8 +288,8 @@ begin
 end;
 $$;
 
--- Save one report file of a running run (replacing a file of the same path). At most 1000
--- files per run. Returns false when the run is not running (deleted, say).
+-- Save one report file of a running run (replacing a file of the same path). At most 200 files
+-- and 20 MiB in all per run. Returns false when the run is not running (deleted, say).
 create or replace function app_screen_reader_journeys.worker_save_report(
   p_token text,
   p_run_id uuid,
@@ -273,8 +313,12 @@ begin
   if v_user is null then
     return false;
   end if;
-  if (select count(*) from app_screen_reader_journeys.run_reports f where f.run_id = p_run_id and f.path <> p_path) >= 1000 then
-    raise exception 'A run keeps at most 1000 report files.' using errcode = '54000';
+  if (select count(*) from app_screen_reader_journeys.run_reports f where f.run_id = p_run_id and f.path <> p_path) >= 200 then
+    raise exception 'A run keeps at most 200 report files.' using errcode = '54000';
+  end if;
+  if (select coalesce(sum(pg_catalog.octet_length(f.body)), 0) from app_screen_reader_journeys.run_reports f
+       where f.run_id = p_run_id and f.path <> p_path) + coalesce(pg_catalog.octet_length(p_body), 0) > 20971520 then
+    raise exception 'A run keeps at most 20 MiB of reports.' using errcode = '54000';
   end if;
   insert into app_screen_reader_journeys.run_reports (run_id, user_id, path, content_type, body)
   values (p_run_id, v_user, p_path, p_content_type, p_body)
@@ -286,7 +330,8 @@ $$;
 
 -- Record a running run's results: a JSON array of
 -- { journey, mode, status, checks_passed, checks_total, errors, warnings, report_path }.
--- Returns how many rows were added (0 when the run is not running).
+-- At most one result per journey and mode of the run in all. Returns how many rows were added
+-- (0 when the run is not running).
 create or replace function app_screen_reader_journeys.worker_add_results(p_token text, p_run_id uuid, p_results jsonb)
 returns integer
 language plpgsql
@@ -296,17 +341,22 @@ set search_path = ''
 as $$
 declare
   v_user uuid;
+  v_most integer;
   v_count integer;
 begin
   perform app_screen_reader_journeys.worker_token_ok(p_token);
   if p_results is null or pg_catalog.jsonb_typeof(p_results) <> 'array' or pg_catalog.jsonb_array_length(p_results) > 200 then
     raise exception 'p_results must be a JSON array of at most 200 results.' using errcode = '22023';
   end if;
-  select r.user_id into v_user
+  select r.user_id, pg_catalog.cardinality(r.journeys) * pg_catalog.cardinality(r.modes) into v_user, v_most
     from app_screen_reader_journeys.runs r
    where r.id = p_run_id and r.status = 'running';
   if v_user is null then
     return 0;
+  end if;
+  if (select count(*) from app_screen_reader_journeys.run_results x where x.run_id = p_run_id)
+     + pg_catalog.jsonb_array_length(p_results) > v_most then
+    raise exception 'A run keeps at most one result per journey and mode.' using errcode = '54000';
   end if;
   insert into app_screen_reader_journeys.run_results
     (run_id, user_id, journey, mode, status, checks_passed, checks_total, errors, warnings, report_path)
@@ -369,6 +419,7 @@ revoke execute on function app_screen_reader_journeys.limit_active_runs() from p
 revoke execute on function app_screen_reader_journeys.worker_token_ok(text) from public, anon, authenticated;
 revoke execute on function app_screen_reader_journeys.worker_claim_next_run(text) from public, authenticated;
 revoke execute on function app_screen_reader_journeys.worker_fail_stale_runs(text, integer) from public, authenticated;
+revoke execute on function app_screen_reader_journeys.worker_prune_runs(text) from public, authenticated;
 revoke execute on function app_screen_reader_journeys.worker_requeue_run(text, uuid) from public, authenticated;
 revoke execute on function app_screen_reader_journeys.worker_save_report(text, uuid, text, text, text) from public, authenticated;
 revoke execute on function app_screen_reader_journeys.worker_add_results(text, uuid, jsonb) from public, authenticated;
@@ -376,6 +427,7 @@ revoke execute on function app_screen_reader_journeys.worker_finish_run(text, uu
 
 grant execute on function app_screen_reader_journeys.worker_claim_next_run(text) to anon;
 grant execute on function app_screen_reader_journeys.worker_fail_stale_runs(text, integer) to anon;
+grant execute on function app_screen_reader_journeys.worker_prune_runs(text) to anon;
 grant execute on function app_screen_reader_journeys.worker_requeue_run(text, uuid) to anon;
 grant execute on function app_screen_reader_journeys.worker_save_report(text, uuid, text, text, text) to anon;
 grant execute on function app_screen_reader_journeys.worker_add_results(text, uuid, jsonb) to anon;

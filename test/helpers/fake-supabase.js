@@ -105,6 +105,12 @@ export function fakeSupabase({ runs = [], users = {}, workerToken = WORKER_TOKEN
       for (const run of stale) Object.assign(run, { status: "failed", error: "The server stopped before this run finished.", finished_at: now() });
       return stale.length;
     },
+    worker_prune_runs() {
+      const cutoff = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
+      const old = fake.tables.runs.filter((r) => ["done", "failed"].includes(r.status) && r.finished_at && r.finished_at < cutoff);
+      fake.tables.runs = fake.tables.runs.filter((r) => !old.includes(r));
+      return old.length;
+    },
     worker_requeue_run({ p_run_id }) {
       const run = running(p_run_id);
       if (run) Object.assign(run, { status: "queued", started_at: null });
@@ -149,6 +155,10 @@ export function fakeSupabase({ runs = [], users = {}, workerToken = WORKER_TOKEN
     },
     async rpc(name, args = {}) {
       fake.calls.push({ op: "rpc", name, args: structuredClone(args) });
+      // As PostgREST: a text argument cannot hold U+0000.
+      if (Object.values(args).some((v) => typeof v === "string" && v.includes("\u0000"))) {
+        return { data: null, error: { code: "22P05", message: "unsupported Unicode escape sequence" } };
+      }
       const injected = fake.failures.findIndex((f) => f.op === "rpc" && f.name === name);
       if (injected >= 0) return { data: null, error: fake.failures.splice(injected, 1)[0].error };
       if (!functions[name]) return { data: null, error: { message: `Could not find the function ${name}` } };

@@ -53,9 +53,10 @@ releases, and each production step waits for the owner's yes.
    - **`run_results` and `run_reports`.** People read their own.
    - **`worker_config`.** The SHA-256 of `WORKER_TOKEN`. Nobody reads it through the API.
    - **The worker functions**, each `security definer` with `search_path = ''`, which only `anon`
-     may call: `worker_claim_next_run`, `worker_fail_stale_runs`, `worker_requeue_run`,
-     `worker_save_report`, `worker_add_results` and `worker_finish_run`. Each checks the token's
-     SHA-256 against `worker_config` and refuses every token until that row exists.
+     may call: `worker_claim_next_run`, `worker_fail_stale_runs`, `worker_prune_runs`,
+     `worker_requeue_run`, `worker_save_report`, `worker_add_results` and `worker_finish_run`.
+     Each checks the token's SHA-256 against `worker_config` and refuses every token until that
+     row exists.
 2. **Expose the schema** to the Data API (`expose-schema app_screen_reader_journeys`). Until then,
    PostgREST answers 406 for every request.
 3. **`check-schema app_screen_reader_journeys`** must pass before the first deploy.
@@ -68,7 +69,8 @@ Every table has `user_id ... references auth.users (id) on delete cascade`, so t
 The worker proves itself to the `worker_*` functions with a random token. The database keeps only
 the token's SHA-256, which is not secret.
 
-1. The owner makes the token, and keeps it out of chat, files and workflow inputs:
+1. The owner makes the token (32 to 200 printable ASCII characters, without spaces), and keeps it
+   out of chat, files and workflow inputs:
 
    ```bash
    openssl rand -base64 32
@@ -87,6 +89,13 @@ the token's SHA-256, which is not secret.
 
 A new token needs both steps again: the new secret on Render, and its hash pinned. Until both are
 done, the worker logs `Bad worker token.` and claims nothing.
+
+`test/secrets.test.js` fails if the token or its hash is in any committed file. Run it with the
+real token in the environment before a release:
+
+```bash
+WORKER_TOKEN="$WORKER_TOKEN" node --test test/secrets.test.js
+```
 
 ## 3. Render
 
@@ -107,10 +116,28 @@ shared with other apps). It needs a service of its own, built from this reposito
   `render.yaml`, and `SUPABASE_TIMEOUT_SECONDS` defaults to 30.
 - **Set for you.** Render sets `PORT`, and the Docker image sets `RUN_AS_UID` and `RUN_AS_GID`.
 - **Leave unset:** `CHROMIUM_SANDBOX` (see [Security](#security)).
-- **Plan.** The free plan costs nothing. It sleeps after 15 minutes without requests: a queued
-  run waits until the next request wakes it, which takes about a minute. It also has 512 MB, which
-  Chromium can exceed on large pages. A paid plan needs the owner's yes. Keep one instance, since
-  the worker runs one run at a time.
+- **Plan: free** (the owner, 23 November 2026). It costs nothing, and has 0.1 CPU and 512 MB.
+  Keep one instance, since the worker runs one run at a time. A paid plan needs the owner's yes.
+  - **It sleeps** after 15 minutes without requests. A queued run waits until the next request
+    wakes the service. Waking takes Render's own start, then about 7 seconds for the server to
+    listen, then about 9 seconds for Chromium's first start (both measured at 0.1 CPU).
+  - **A run can be interrupted.** The dashboard asks for a run's status every 4 seconds while its
+    page is open, which keeps the service awake. If nobody has the page open, the service may go
+    to sleep mid-run: the run then goes back in the queue and starts again on the next visit.
+    The run page and the new-run form both say so.
+  - **Measured** (23 November 2026): 6 journeys in both modes (12 journey runs), against a local
+    copy of the STEM-Accessibility preview with the mock backend, through the real worker path
+    (the run process and Chromium), with cgroup limits:
+
+    | CPU and memory | Time | Peak memory of the run |
+    |---|---|---|
+    | 4 CPUs, no limit | 172 s | 292 MB |
+    | 0.5 CPU, 512 MB | 188 s | 276 MB |
+    | 0.1 CPU, 512 MB | 362 s | 263 MB |
+
+    Each finished all 12 journey runs, with the same results, and none ran out of memory. The
+    idle server adds about 146 MB, so the instance peaks at about 410 to 440 MB of 512 MB.
+    Heavier real sites may need more; that has not been measured.
 - **Check it:**
 
   ```bash
@@ -225,10 +252,17 @@ domain only you control, where you can.
   - A run left `running` by a service that crashed is marked failed ten minutes after its timeout.
 - **Limits.**
   - Three runs waiting or running per person (`limit_active_runs`).
-  - At most 1000 report files per run, of at most 2 MB each. A larger file is left out, and the
-    run's summary lists it under `skipped_files`.
-- **Storage.** Runs, results and reports are kept until the person deletes the run or their
-  account.
+  - Per run: at most one result per journey and mode, and at most 200 report files and 20 MiB of
+    reports, of at most 2 MiB each. A file over 2 MiB, with a name the database does not take, or
+    refused by the database, is left out, and the run's summary lists it under `skipped_files`.
+    The run still finishes. NUL characters in a report become U+FFFD.
+- **Retention** (proposed, for the owner to confirm):
+  - each person keeps their 20 latest runs; queueing a new one deletes their oldest finished
+    runs beyond that;
+  - finished runs older than 30 days are deleted, by `worker_prune_runs`, which the worker calls
+    about once an hour.
+
+  Deleting a run, or the account, deletes its results and reports at once.
 - **Logs.** Render's log shows each run starting and ending. The network guard's refusals are
   stored with the run (`summary.blocked_requests`) and shown on the run page.
 
@@ -261,5 +295,8 @@ domain only you control, where you can.
     the image up to date.
   - Set `CHROMIUM_SANDBOX=true` only on a host where Chromium's sandbox works.
 - **Errors** shown to people are short. Database details go only to Render's log.
+- **Reports** are fetched one at a time, when their download button is pressed, and always saved
+  as `application/octet-stream`. A report is never opened as a page at the dashboard's address,
+  next to the person's session.
 - **CORS** limits which websites may call the API from a browser. It is not authentication: every
   call that reads or creates runs needs a valid Supabase access token.

@@ -72,8 +72,8 @@ export interface Run {
 }
 interface ReportRow {
   path: string;
-  content_type: string;
-  body: string;
+  content_type?: string;
+  body?: string;
 }
 
 type DbResult<T> = PromiseLike<{ data: T | null; error: { message: string } | null }>;
@@ -353,7 +353,7 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
         h('p', { id: `mode-${mode}-hint`, class: 'hint' }, MODES[mode]?.[1] ?? ''),
       ),
     );
-    const submit = h('button', { type: 'submit' }, 'Start run');
+    const submit = h('button', { type: 'submit', 'aria-describedby': 'start-hint' }, 'Start run');
     const form = h(
       'form',
       { novalidate: true, 'aria-labelledby': 'new-run-heading' },
@@ -367,7 +367,12 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
       ),
       h('fieldset', { 'aria-describedby': 'journeys-error' }, h('legend', {}, 'Journeys'), journeyBoxes, errors.journeys),
       h('fieldset', { 'aria-describedby': 'modes-error' }, h('legend', {}, 'Modes'), modeBoxes, errors.modes),
-      h('div', {}, submit),
+      h(
+        'div',
+        {},
+        h('p', { id: 'start-hint', class: 'hint' }, 'After a quiet spell the server is asleep, and the first run waits about a minute while it wakes.'),
+        submit,
+      ),
     ) as HTMLFormElement;
 
     const fields: Record<string, HTMLElement | null | undefined> = {
@@ -454,22 +459,39 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
   // One run -----------------------------------------------------------------------------------
 
   let pollTimer: ReturnType<typeof setTimeout> | undefined;
-  let reportUrls: string[] = [];
 
-  /** Download links for a run's report files (row level security: your own runs only). */
-  async function reportLinks(runId: string, paths: string[]): Promise<Map<string, string>> {
-    for (const url of reportUrls) URL.revokeObjectURL(url);
-    reportUrls = [];
-    if (!paths.length) return new Map();
-    const { data, error } = await client.from('run_reports').select('path, content_type, body').eq('run_id', runId).in('path', paths);
+  /**
+   * Which of a run's report files are there (row level security: your own runs only). Only the
+   * names: each body is fetched when its download is asked for.
+   */
+  async function reportFiles(runId: string, paths: string[]): Promise<Set<string>> {
+    if (!paths.length) return new Set();
+    const { data, error } = await client.from('run_reports').select('path, content_type').eq('run_id', runId).in('path', paths);
     if (error || !data) throw new Error(`The reports could not be loaded: ${error?.message ?? 'no answer'}`);
-    return new Map(
-      data.map((d) => {
-        const url = URL.createObjectURL(new Blob([d.body], { type: d.content_type }));
-        reportUrls.push(url);
-        return [d.path, url];
-      }),
-    );
+    return new Set(data.map((d) => d.path));
+  }
+
+  /**
+   * Fetch one report and save it. Always application/octet-stream: a report is a download, never
+   * a page opened at this site's address, next to the person's session.
+   */
+  async function downloadReport(runId: string, path: string) {
+    announce(`Downloading ${fileName(path)}…`);
+    const { data, error } = await client.from('run_reports').select('path, body').eq('run_id', runId).in('path', [path]);
+    const row = data?.[0];
+    if (error || !row || typeof row.body !== 'string') {
+      announce('');
+      showError(`The report could not be downloaded: ${error?.message ?? 'it is no longer there'}`);
+      return;
+    }
+    const url = URL.createObjectURL(new Blob([row.body], { type: 'application/octet-stream' }));
+    const a = h('a', { href: url, download: fileName(path), hidden: true });
+    doc.body.append(a);
+    a.click();
+    a.remove();
+    // After the download has started.
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    announce(`Downloaded ${fileName(path)}.`);
   }
 
   function deleteButton(run: Run) {
@@ -488,7 +510,7 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
     return button;
   }
 
-  function runDetails(run: Run, list: Catalog | null, links: Map<string, string>): Child[] {
+  function runDetails(run: Run, list: Catalog | null, available: Set<string>): Child[] {
     const facts: [string, Child][] = [
       ['Status', badge(STATUS[run.status] ?? [run.status, 'busy'])],
       ['Site', h('span', { class: 'url' }, run.base_url)],
@@ -503,13 +525,19 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
     const files = run.summary?.files ?? [];
     const skipped = run.summary?.skipped_files ?? [];
     const blocked = run.summary?.blocked_requests ?? [];
-    const download = (path: string, text: Child) => {
-      const href = links.get(path);
-      return href ? h('a', { href, download: fileName(path) }, text) : null;
-    };
+    const download = (path: string, text: Child) =>
+      available.has(path) ? h('button', { type: 'button', class: 'link-button', onclick: () => void downloadReport(run.id, path) }, text) : null;
+    const waiting = run.status === 'queued' || run.status === 'running';
     return [
       h('h2', { id: 'status-heading', tabindex: '-1' }, 'Status'),
       h('dl', { class: 'facts' }, facts.map(([term, value]) => [h('dt', {}, term), h('dd', {}, value)])),
+      waiting
+        ? h(
+            'p',
+            { class: 'hint', id: 'sleep-note' },
+            'The server sleeps after 15 minutes without visitors, and takes about a minute to wake, so a run may wait before it starts. Keep this page open until the run finishes: if the server goes to sleep while nobody has the page open, the run stops and goes back in the queue, and starts again when someone next visits.',
+          )
+        : null,
       h('h2', { id: 'results-heading' }, 'Results'),
       results.length
         ? scrollable(
@@ -552,7 +580,7 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
             h('ul', {}, blocked.map((b) => h('li', { class: 'url' }, b))),
           ]
         : null,
-      run.status === 'queued' || run.status === 'running' ? null : [h('h2', {}, 'Delete'), h('p', {}, deleteButton(run))],
+      waiting ? null : [h('h2', {}, 'Delete'), h('p', {}, deleteButton(run))],
     ];
   }
 
@@ -588,9 +616,9 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
       const key = `${run.status}|${run.run_results?.length ?? 0}`;
       if (key !== shown) {
         const list = await loadCatalog().catch(() => null);
-        let links = new Map<string, string>();
+        let available = new Set<string>();
         try {
-          links = await reportLinks(run.id, [...new Set([...(run.summary?.files ?? []), ...(run.run_results ?? []).map((r) => r.report_path).filter((p): p is string => Boolean(p))])]);
+          available = await reportFiles(run.id, [...new Set([...(run.summary?.files ?? []), ...(run.run_results ?? []).map((r) => r.report_path).filter((p): p is string => Boolean(p))])]);
         } catch (error) {
           showError((error as Error).message);
         }
@@ -602,7 +630,7 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
           if (Array.isArray(child)) child.forEach(collect);
           else if (child instanceof win.Node) nodes.push(child);
         };
-        collect(runDetails(run, list, links));
+        collect(runDetails(run, list, available));
         details.replaceChildren(...nodes);
         if (hadFocus) byId('status-heading')?.focus();
         if (shown !== null) announce(run.status === 'done' || run.status === 'failed' ? finishedText(run) : `The run is ${STATUS[run.status]?.[0].toLowerCase() ?? run.status}.`);
