@@ -259,7 +259,7 @@ domain only you control, where you can.
     reports, of at most 2 MiB each. A file over 2 MiB, with a name the database does not take, or
     refused by the database, is left out, and the run's summary lists it under `skipped_files`.
     The run still finishes. NUL characters in a report become U+FFFD.
-- **Retention** (proposed, for the owner to confirm):
+- **Retention** (PManager's decision, 23 November 2026; the privacy note on the page says so):
   - each person keeps their 20 latest runs; queueing a new one deletes their oldest finished
     runs beyond that;
   - finished runs older than 30 days are deleted, by `worker_prune_runs`, which the worker calls

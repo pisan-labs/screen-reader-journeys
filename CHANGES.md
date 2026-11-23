@@ -21,3 +21,5 @@ Append-only journal, oldest first. Earlier history: `git log` and `docs/handoff.
 2026-11-23 [decision] Owner (via PManager): the worker's own Render service is on the free plan; PManager generates WORKER_TOKEN and pins its hash at release.
 
 2026-11-23 [code] Review of #10, R1.1 to R1.7: safer report saving, downloads as octet-stream on click, per-run caps, retention (20 runs, 30 days, proposed), clock-free SQL test, ASCII token rule.
+
+2026-11-23 [decision] PManager: retention and caps as proposed (20 runs per person, 30 days, 200 files, 20 MiB per run); the privacy note says so.

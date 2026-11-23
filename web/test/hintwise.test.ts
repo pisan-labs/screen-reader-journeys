@@ -37,6 +37,8 @@ describe('HintWise footer, favicon and analytics', () => {
     expect(privacy).toMatch(/stored under your account/);
     expect(privacy).toMatch(/Supabase, US East/);
     expect(privacy).toMatch(/Delete my account/);
+    expect(privacy).toMatch(/deleted 30 days after it finishes/);
+    expect(privacy).toMatch(/at most your 20 latest runs/);
     expect(privacy).toMatch(/counted without cookies/);
     expect(privacy).not.toMatch(/no tracking/i);
   });
