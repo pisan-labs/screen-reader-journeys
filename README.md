@@ -100,6 +100,8 @@ hear changes.
 | `sr.expectAnnouncement(textOrRegExp, { within })` | Wait for a live-region announcement, or speech in virtual and voiceover modes |
 | `sr.walkTabOrder({ max })` | Tab through the whole page once, recording every stop |
 | `sr.readPage({ max })` | Read line by line, like a screen reader's "read next" (virtual and voiceover) |
+| `sr.expect(ok, text, detail)` | Record a check of your own, e.g. on `sr.page` or `sr.last` |
+| `sr.last` | The step just recorded: its `action`, what was `spoken`, and the `focus` |
 | `sr.note(text)` | Add a line to the transcript |
 | `sr.page` | The Playwright page, for anything else |
 
