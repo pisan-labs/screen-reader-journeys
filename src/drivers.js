@@ -215,7 +215,16 @@ class OrcaDriver extends GuidepupDriver {
     if (process.platform !== "linux") throw new Error("The orca mode runs only on Linux.");
     const { orca } = await import("@guidepup/guidepup");
     this.sr = orca;
-    await orca.start({ capture: "initial" });
+    // Orca sometimes comes up after Guidepup has stopped waiting for it ("Orca cannot be
+    // started", seen on GitHub's runner while the next run started fine). Try once more.
+    try {
+      await orca.start({ capture: "initial" });
+    } catch (error) {
+      if (!/cannot be started/i.test(error.message)) throw error;
+      await orca.stop().catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      await orca.start({ capture: "initial" });
+    }
   }
 
   async start() {
