@@ -122,6 +122,8 @@ hear changes.
 | `sr.expectAnnouncement(textOrRegExp, { within })` | Wait for a live-region announcement, or speech in virtual and voiceover modes |
 | `sr.walkTabOrder({ max })` | Tab through the whole page once, recording every stop |
 | `sr.readPage({ max })` | Read line by line, like a screen reader's "read next" (virtual and voiceover) |
+| `sr.expect(ok, text, detail)` | Record a check of your own, e.g. on `sr.page` or `sr.last` |
+| `sr.last` | The step just recorded: its `action`, what was `spoken`, and the `focus` |
 | `sr.note(text)` | Add a line to the transcript |
 | `sr.page` | The Playwright page, for anything else |
 
@@ -133,7 +135,8 @@ Chromium reports: `button`, `link`, `combobox`, `checkbox`, `heading` and so on.
 - [`targets/stem-accessibility`](targets/stem-accessibility): journeys for the
   [STEM-Accessibility](https://github.com/stem-accessibility/frontend) frontend. `mock.js` fakes
   its backend inside the browser, so journeys run against any build (a local dev server, or a
-  pull request's Vercel preview) without touching real data.
+  pull request's Vercel preview) without touching real data. A journey for a feature still in a
+  pull request names it in its description; on other builds it fails at the first missing step.
 - [`targets/generic`](targets/generic): works on any site (the home page's Tab order).
 
 ## In CI
