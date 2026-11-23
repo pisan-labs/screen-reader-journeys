@@ -1,0 +1,202 @@
+// The dashboard (web/), checked with this tool itself: build it with web/build.mjs, serve it,
+// answer Supabase and the API inside the browser, and walk it by keyboard. Also loads it under
+// its own Content-Security-Policy, which runJourney bypasses.
+import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { readFile, mkdtemp, rm } from "node:fs/promises";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { extname, join } from "node:path";
+import { after, before, describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+import { chromium } from "playwright";
+import { runJourney } from "../src/journey.js";
+
+const SUPABASE = "https://test-project.supabase.co";
+const API = "https://api.srj.test";
+const USER = { id: "00000000-0000-4000-8000-00000000000a", aud: "authenticated", role: "authenticated", email: "reviewer@example.org" };
+const RUN_ID = "3f2a1c9e-8b7d-4e6f-9a0b-1c2d3e4f5a6b";
+const HOME = "targets/generic/home-tab-order.journey.js";
+const CATALOG = {
+  journeys: [
+    { path: HOME, name: "Home page: Tab order", description: "Every Tab stop on the site's home page." },
+    { path: "targets/stem-accessibility/journeys/braille-download.journey.js", name: "Shared STEM image: download the braille file", description: "" },
+  ],
+  modes: ["walker", "virtual"],
+  allowed_hosts: ["*.vercel.app"],
+};
+
+let out;
+let site;
+let csp;
+
+before(async () => {
+  out = await mkdtemp(join(tmpdir(), "srj-web-"));
+  await promisify(execFile)(process.execPath, [fileURLToPath(new URL("../web/build.mjs", import.meta.url))], {
+    env: { ...process.env, WEB_OUT_DIR: out, VITE_SUPABASE_URL: SUPABASE, VITE_SUPABASE_ANON_KEY: "anon-key", VITE_API_URL: API },
+  });
+  csp = /Content-Security-Policy: (.*)/.exec(await readFile(join(out, "_headers"), "utf8"))[1];
+  const types = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css" };
+  const server = createServer(async (req, res) => {
+    const name = new URL(req.url, "http://x").pathname.slice(1) || "index.html";
+    if (!/^[a-z]+\.(html|js|css)$/.test(name)) return res.writeHead(404).end();
+    try {
+      res.writeHead(200, { "Content-Type": types[extname(name)], "Content-Security-Policy": csp }).end(await readFile(join(out, name)));
+    } catch {
+      res.writeHead(404).end();
+    }
+  });
+  await new Promise((done) => server.listen(0, "127.0.0.1", done));
+  site = { url: `http://127.0.0.1:${server.address().port}`, close: () => server.close() };
+});
+after(async () => {
+  site?.close();
+  await rm(out, { recursive: true, force: true });
+});
+
+/** Answer Supabase and the API inside the browser, as targets/stem-accessibility/mock.js does for its backend. */
+async function fakeBackend(page, { signedIn, posted = [] }) {
+  if (signedIn) {
+    const session = { access_token: "header.payload.signature", refresh_token: "refresh", token_type: "bearer", expires_in: 3600, expires_at: Math.floor(Date.now() / 1000) + 3600, user: USER };
+    await page.addInitScript(([key, value]) => localStorage.setItem(key, value), ["sb-test-project-auth-token", JSON.stringify(session)]);
+  }
+  const cors = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "*", "Access-Control-Allow-Methods": "GET, POST, OPTIONS" };
+  const json = (route, body, status = 200) => route.fulfill({ status, contentType: "application/json", headers: cors, body: JSON.stringify(body) });
+  let runReads = 0;
+  const run = () => ({
+    id: RUN_ID,
+    base_url: "https://preview.vercel.app/",
+    journeys: [HOME],
+    modes: ["walker"],
+    status: runReads > 1 ? "done" : "running",
+    created_at: "2026-11-23T10:00:00Z",
+    started_at: "2026-11-23T10:00:05Z",
+    finished_at: runReads > 1 ? "2026-11-23T10:00:40Z" : null,
+    error: null,
+    summary: runReads > 1 ? { results: 1, passed: 1, failed: 0, errored: 0, errors: 2, warnings: 1, files: [`${RUN_ID}/home-page-tab-order.walker.md`, `${RUN_ID}/summary.md`], blocked_requests: [], timed_out: false } : null,
+    run_results: runReads > 1 ? [{ id: "r1", run_id: RUN_ID, journey: HOME, mode: "walker", status: "pass", checks_passed: 0, checks_total: 0, errors: 2, warnings: 1, report_path: `${RUN_ID}/home-page-tab-order.walker.md` }] : [],
+  });
+  await page.route(`${SUPABASE}/**`, async (route) => {
+    const request = route.request();
+    if (request.method() === "OPTIONS") return route.fulfill({ status: 204, headers: cors });
+    const { pathname } = new URL(request.url());
+    if (pathname === "/auth/v1/otp") return json(route, {});
+    if (pathname === "/auth/v1/user") return json(route, USER);
+    if (pathname === "/auth/v1/logout") return route.fulfill({ status: 204, headers: cors });
+    if (pathname === "/rest/v1/runs") return json(route, posted.length ? [{ id: RUN_ID, base_url: "https://preview.vercel.app/", status: "queued", created_at: "2026-11-23T10:00:00Z", summary: null }] : []);
+    if (pathname === "/storage/v1/object/sign/reports") {
+      const { paths } = JSON.parse(request.postData());
+      return json(route, paths.map((path) => ({ path, signedURL: `/object/sign/reports/${path}?token=t`, error: null })));
+    }
+    return json(route, { message: `unexpected ${pathname}` }, 404);
+  });
+  await page.route(`${API}/**`, async (route) => {
+    const request = route.request();
+    if (request.method() === "OPTIONS") return route.fulfill({ status: 204, headers: cors });
+    const { pathname } = new URL(request.url());
+    if (pathname === "/journeys") return json(route, CATALOG);
+    if (pathname === "/runs" && request.method() === "POST") {
+      posted.push(JSON.parse(request.postData()));
+      return json(route, { run: { id: RUN_ID, status: "queued" } }, 201);
+    }
+    if (pathname === `/runs/${RUN_ID}`) {
+      runReads += 1;
+      return json(route, { run: run() });
+    }
+    return json(route, { error: "Not found." }, 404);
+  });
+}
+
+const signIn = {
+  name: "Dashboard: sign in",
+  start: "/index.html",
+  ready: "#email",
+  setup: (page) => fakeBackend(page, { signedIn: false }),
+  async run(sr) {
+    await sr.tabTo({ role: "link", name: "Skip to main content" }, { max: 1 });
+    await sr.tabTo({ role: "button", name: "Send sign-in link" });
+    await sr.activate();
+    await sr.expectAnnouncement(/Enter an email address/);
+    await sr.expectFocus({ role: "textbox", name: "Email address" });
+    await sr.page.keyboard.type("reviewer@example.org");
+    await sr.tabTo({ role: "button", name: "Send sign-in link" });
+    await sr.activate();
+    await sr.expectAnnouncement(/Check your email: we sent a sign-in link to reviewer@example\.org/);
+  },
+};
+
+const posted = [];
+const startRun = {
+  name: "Dashboard: start a run and read its results",
+  start: "/index.html",
+  ready: "#base-url",
+  setup: (page) => fakeBackend(page, { signedIn: true, posted }),
+  async run(sr) {
+    await sr.walkTabOrder();
+    await sr.tabTo({ role: "button", name: "Start run" });
+    await sr.activate();
+    await sr.expectAnnouncement(/There are 2 problems.*Enter the site's address.*Choose at least one journey/);
+    await sr.expectFocus({ role: "textbox", name: "Site address" });
+    await sr.page.keyboard.type("https://preview.vercel.app");
+    await sr.tabTo({ role: "checkbox", name: "Home page: Tab order" });
+    await sr.activate();
+    await sr.tabTo({ role: "button", name: "Start run" });
+    await sr.activate();
+    await sr.expectAnnouncement("Run queued.");
+    await sr.expectFocus({ role: "heading", name: /^Run/ });
+    await sr.expectAnnouncement(/The run finished: 1 passed, 0 failed, 0 errors\./, { within: 12000 });
+    await sr.tabTo({ role: "link", name: "Download the report for Home page: Tab order, Keyboard walker" });
+    await sr.walkTabOrder();
+  },
+};
+
+function assertAccessible(result) {
+  assert.equal(result.status, "pass", `${result.error ?? ""} ${JSON.stringify(result.expectations.filter((e) => !e.ok))}`);
+  assert.deepEqual(result.pageErrors, []);
+  assert.deepEqual(result.findings, [], "no automatic findings: every Tab stop has a role, a name and a focus indicator");
+}
+
+describe("dashboard accessibility", () => {
+  for (const mode of ["walker", "virtual"]) {
+    it(`signs in by keyboard, hearing the errors and the result (${mode})`, async () => {
+      assertAccessible(await runJourney({ ...signIn, file: "test/dashboard.test.js" }, { mode, baseUrl: site.url }));
+    });
+  }
+
+  it("starts a run and reads its results by keyboard (walker)", async () => {
+    const result = await runJourney({ ...startRun, file: "test/dashboard.test.js" }, { mode: "walker", baseUrl: site.url });
+    assertAccessible(result);
+    assert.deepEqual(posted, [{ base_url: "https://preview.vercel.app", journeys: [HOME], modes: ["walker", "virtual"] }]);
+    const heard = result.steps.flatMap((s) => s.spoken).join(" / ");
+    assert.match(heard, /Skip to main content, link/);
+    assert.match(heard, /Sign out, button/);
+    assert.match(heard, /Site address, textbox/);
+  });
+});
+
+describe("dashboard under its Content-Security-Policy", () => {
+  it("allows exactly the configured Supabase project and API", () => {
+    assert.match(csp, /default-src 'none'/);
+    assert.match(csp, /script-src 'self'(;|$)/);
+    assert.match(csp, new RegExp(`connect-src 'self' ${SUPABASE} ${API}(;|$)`));
+    assert.match(csp, /frame-ancestors 'none'/);
+  });
+
+  it("loads and talks to Supabase and the API with no violations", async () => {
+    const browser = await chromium.launch();
+    try {
+      const page = await browser.newPage();
+      const violations = [];
+      page.on("console", (message) => /Content Security Policy|Refused to/i.test(message.text()) && violations.push(message.text()));
+      await fakeBackend(page, { signedIn: true, posted: [] });
+      await page.goto(`${site.url}/index.html`);
+      await page.getByRole("checkbox", { name: "Home page: Tab order" }).waitFor();
+      await page.getByRole("heading", { name: "Runs", level: 1 }).waitFor();
+      await page.getByText("You have not started any runs yet.").waitFor();
+      assert.deepEqual(violations, []);
+    } finally {
+      await browser.close();
+    }
+  });
+});
