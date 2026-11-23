@@ -137,7 +137,10 @@ shared with other apps). It needs a service of its own, built from this reposito
 
     Each finished all 12 journey runs, with the same results, and none ran out of memory. The
     idle server adds about 146 MB, so the instance peaks at about 410 to 440 MB of 512 MB.
-    Heavier real sites may need more; that has not been measured.
+  - **The headroom is about 70 to 100 MB**, and a heavy site may run out of memory. The run
+    then fails: at once if only the browser is stopped, or, if the whole service restarts, once
+    its `RUN_TIMEOUT_SECONDS` and ten minutes have passed. Either way it can be run again. Render's
+    paid Starter plan also has 512 MB, so paying buys speed, not memory.
 - **Check it:**
 
   ```bash
