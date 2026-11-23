@@ -4,6 +4,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { slug } from "./slug.js";
+import { compareResults, hasComparison, renderCompare, renderCompareHtml } from "./compare.js";
 import { renderChecksCsv, renderFindingsCsv, renderJourneyHtml, renderJunit, renderSarif, renderSummaryHtml } from "./formats.js";
 
 export { slug };
@@ -88,6 +89,7 @@ export function renderSummary(results) {
     "|---|---|---|---|---|---|---|",
     ...rows,
     "",
+    hasComparison(results) ? "The same journeys side by side, step by step: [compare.md](compare.md).\n" : "",
     "Findings are automatic and can be wrong; the transcripts are for a person to read. None of",
     "this replaces testing with a real screen reader and with people who use one.",
     "",
@@ -102,6 +104,7 @@ export function renderSummary(results) {
  *   junit  junit.xml
  *   sarif  results.sarif
  *   csv    findings.csv and checks.csv
+ * When a journey ran in more than one mode, md and html also write compare.md and compare.html.
  * Returns the paths written.
  */
 export async function writeReports(results, outDir, { formats = DEFAULT_FORMATS } = {}) {
@@ -122,6 +125,11 @@ export async function writeReports(results, outDir, { formats = DEFAULT_FORMATS 
   }
   if (formats.includes("md")) await write("summary.md", renderSummary(results));
   if (formats.includes("html")) await write("summary.html", renderSummaryHtml(results));
+  if (hasComparison(results)) {
+    const comparison = compareResults(results);
+    if (formats.includes("md")) await write("compare.md", renderCompare(comparison));
+    if (formats.includes("html")) await write("compare.html", renderCompareHtml(comparison));
+  }
   if (formats.includes("junit")) await write("junit.xml", renderJunit(results));
   if (formats.includes("sarif")) await write("results.sarif", renderSarif(results));
   if (formats.includes("csv")) {

@@ -8,6 +8,11 @@
 
 import { slug } from "./slug.js";
 
+const hasComparison = (results) => {
+  const names = results.map((r) => r.journey);
+  return names.some((name, i) => names.indexOf(name) !== i);
+};
+
 const TOOL = { name: "screen-reader-journeys", version: "0.1.0", uri: "https://github.com/pisan-labs/screen-reader-journeys" };
 
 const counts = (r) => ({
@@ -54,14 +59,15 @@ ul.checks li { margin: 4px 0; }
 .note { color: var(--muted); }
 `;
 
-function page(title, body) {
+/** A self-contained, accessible HTML page in the reports' style. */
+export function htmlPage(title, body, extraStyle = "") {
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(title)}</title>
-<style>${STYLE}</style>
+<style>${STYLE}${extraStyle}</style>
 </head>
 <body>
 <a class="skip" href="#main">Skip to the report</a>
@@ -73,7 +79,7 @@ ${body}
 `;
 }
 
-const statusBadge = (status) => `<span class="status status-${status}">${STATUS_TEXT[status] ?? escapeHtml(status)}</span>`;
+export const statusBadge = (status) => `<span class="status status-${status}">${STATUS_TEXT[status] ?? escapeHtml(status)}</span>`;
 
 export function renderJourneyHtml(r) {
   const c = counts(r);
@@ -95,7 +101,7 @@ export function renderJourneyHtml(r) {
     .join("")}</tbody></table></div>`;
   const errorsList = (title, intro, list) =>
     list?.length ? `<h2>${title}</h2><p>${intro}</p><ul>${list.map((e) => `<li>${escapeHtml(e)}</li>`).join("")}</ul>` : "";
-  return page(
+  return htmlPage(
     `${r.journey} (${r.mode})`,
     `<h1>${escapeHtml(r.journey)}</h1>
 ${r.description ? `<p>${escapeHtml(r.description)}</p>` : ""}
@@ -126,11 +132,12 @@ export function renderSummaryHtml(results) {
       return `<tr><th scope="row"><a href="${escapeHtml(`${slug(r.journey)}.${r.mode}.html`)}">${escapeHtml(r.journey)}</a></th><td>${escapeHtml(r.mode)}</td><td>${statusBadge(r.status)}</td><td>${r.expectations.length - c.failed} of ${r.expectations.length}</td><td>${c.errors}</td><td>${c.warnings}</td></tr>`;
     })
     .join("");
-  return page(
+  return htmlPage(
     "Screen reader journeys",
     `<h1>Screen reader journeys</h1>
 ${results[0] ? `<p>Site: ${escapeHtml(new URL(results[0].url).origin)}</p>` : ""}
 <div class="table-wrap"><table><caption>Results by journey and mode</caption><thead><tr><th scope="col">Journey</th><th scope="col">Mode</th><th scope="col">Result</th><th scope="col">Checks passed</th><th scope="col">Errors</th><th scope="col">Warnings</th></tr></thead><tbody>${rows}</tbody></table></div>
+${hasComparison(results) ? '<p><a href="compare.html">Compare the modes side by side, step by step</a>.</p>' : ""}
 <p class="note">Findings are automatic and can be wrong; the transcripts are for a person to read. None of this replaces testing with a real screen reader and with people who use one.</p>`
   );
 }
