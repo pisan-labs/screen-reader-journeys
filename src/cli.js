@@ -17,7 +17,7 @@ const USAGE = `Usage:
   srj list [paths...]
 
 Formats: ${FORMATS.join(", ")} (default ${DEFAULT_FORMATS.join(",")}).
-Modes: walker (accessibility tree), virtual (emulated screen reader), voiceover (macOS only).`;
+Modes: walker (accessibility tree), virtual (emulated screen reader), voiceover (macOS only), orca (Linux) and nvda (Windows), after Guidepup's setup.`;
 
 async function findJourneys(paths) {
   const files = [];

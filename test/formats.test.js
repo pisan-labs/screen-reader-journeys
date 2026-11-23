@@ -116,3 +116,15 @@ describe("writeReports", () => {
     await assert.rejects(writeReports([result], dir, { formats: ["pdf"] }), /Unknown report format: pdf/);
   });
 });
+
+describe("withoutKeyEcho", () => {
+  it("drops a screen reader's echo of the pressed key, alone or joined to the speech", async () => {
+    const { withoutKeyEcho } = await import("../src/drivers.js");
+    assert.deepEqual(withoutKeyEcho(["tab. main content. Save. button"], "Tab"), ["main content. Save. button"]);
+    assert.deepEqual(withoutKeyEcho(["return. Saved."], "Enter"), ["Saved."]);
+    assert.deepEqual(withoutKeyEcho(["tab", "Save, button"], "Tab"), ["Save, button"]);
+    assert.deepEqual(withoutKeyEcho(["shift tab", "Skip, link"], "Shift+Tab"), ["Skip, link"]);
+    // Speech that only starts with the same letters is kept.
+    assert.deepEqual(withoutKeyEcho(["Tabs, list", "main landmark, Save, button"], "Tab"), ["Tabs, list", "main landmark, Save, button"]);
+  });
+});
