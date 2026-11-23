@@ -137,7 +137,8 @@ class Session {
   /** Choose an option in the focused <select> by its label (as arrow keys would, without opening the list). */
   async selectOption(label) {
     try {
-      await this.page.locator(":focus").selectOption({ label }, { timeout: 2000 });
+      // The last match: a shadow host also matches :focus (see describeFocusPortable).
+      await this.page.locator(":focus").last().selectOption({ label }, { timeout: 2000 });
     } catch {
       this.expect(false, `Choose "${label}" in the focused list`, "no such option");
       throw new StopJourney(`No option "${label}"`);

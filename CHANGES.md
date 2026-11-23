@@ -29,3 +29,5 @@ Append-only journal, oldest first. Earlier history: `git log` and `docs/handoff.
 2026-11-23 [code] run_results: unique (run_id, journey, mode), and results must be for the run's own journeys and modes.
 
 2026-11-23 [code] The server and the tool get ESLint, tsc --checkJs (JSDoc, non-strict) and a coverage gate on server/ at 85%; CI runs them.
+
+2026-11-23 [code] R2.5 (review of #11): the portable focus reader and selectOption take the last :focus match, so focus inside a shadow root is the focused element; live regions in shadow roots are still not heard.

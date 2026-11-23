@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import dgram from "node:dgram";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
