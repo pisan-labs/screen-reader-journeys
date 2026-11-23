@@ -38,8 +38,11 @@ jobs:
           cache: npm
       - run: npm ci
       # Installs Orca's system packages (orca, xvfb, xdotool, dbus-x11, ...) and Guidepup's Orca build.
+      # `setup` installs the system packages; `install orca` downloads Guidepup's Orca build.
       - name: Guidepup setup
-        run: npx --yes @guidepup/setup@0.29.3 setup --ci
+        run: |
+          npx --yes @guidepup/setup@0.29.3 setup --ci
+          npx --yes @guidepup/setup@0.29.3 install orca
       - run: npx playwright install --with-deps chromium
       # The display and session bus are started first, so Orca and the browser share them.
       - name: Self-test with Orca
