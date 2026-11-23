@@ -10,12 +10,13 @@ import { readdir, stat } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { loadJourney, runJourney } from "./journey.js";
-import { writeReports } from "./report.js";
+import { DEFAULT_FORMATS, FORMATS, writeReports } from "./report.js";
 
 const USAGE = `Usage:
-  srj run [paths...] --base-url URL [--mode walker,virtual] [--out reports] [--headed] [--fail-on error|warning|none]
+  srj run [paths...] --base-url URL [--mode walker,virtual] [--format md,json,html] [--out reports] [--headed] [--fail-on error|warning|none]
   srj list [paths...]
 
+Formats: ${FORMATS.join(", ")} (default ${DEFAULT_FORMATS.join(",")}).
 Modes: walker (accessibility tree), virtual (emulated screen reader), voiceover (macOS only), orca (Linux) and nvda (Windows), after Guidepup's setup.`;
 
 async function findJourneys(paths) {
@@ -38,6 +39,7 @@ async function main() {
       "base-url": { type: "string" },
       mode: { type: "string", default: "walker,virtual" },
       out: { type: "string", default: "reports" },
+      format: { type: "string", default: DEFAULT_FORMATS.join(",") },
       headed: { type: "boolean", default: false },
       "fail-on": { type: "string", default: "none" },
       help: { type: "boolean", short: "h", default: false },
@@ -72,8 +74,9 @@ async function main() {
       results.push(result);
     }
   }
-  await writeReports(results, values.out);
-  console.log(`Reports: ${relative(process.cwd(), resolve(values.out, "summary.md"))}`);
+  const formats = values.format.split(",").map((f) => f.trim()).filter(Boolean);
+  const written = await writeReports(results, values.out, { formats });
+  console.log(`Reports (${formats.join(", ")}): ${written.length} files in ${relative(process.cwd(), resolve(values.out)) || "."}`);
 
   const failOn = values["fail-on"];
   const findingFails = results.some((r) =>
