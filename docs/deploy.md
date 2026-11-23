@@ -296,9 +296,9 @@ domain only you control, where you can.
 
     So a link to `/proc/self/environ`, a folder swapped for a link, or a hard link never makes
     the server read a file the run could not.
-  - **PID 1** in the image is `node`, which does not reap orphaned processes. They stay as
-    zombies, which can do nothing and which the stop counts as gone. An init such as `tini` would
-    reap them; that is an image change for the release.
+  - **PID 1** in the image is `tini` (`ENTRYPOINT ["/usr/bin/tini", "--"]`), which reaps
+    orphaned processes, so a run's leftovers do not pile up as zombies. It also passes Render's
+    SIGTERM on to the server, which then puts a run in progress back in the queue.
   - The run process that drives the browser gets only a short list of harmless variables (`PATH`,
     `HOME`, `TMPDIR`, the locale and time zone, `NODE_ENV` and `PLAYWRIGHT_BROWSERS_PATH`). It runs as `runner`, an unprivileged user, while the
     server runs as root. So even a page that breaks out of Chromium cannot read the server's
