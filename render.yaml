@@ -1,0 +1,37 @@
+# Render Blueprint for the hosted service; docs/deploy.md walks through it. One Docker web
+# service runs the HTTP API and the worker. Secrets are not in this file: Render asks for each
+# `sync: false` value when the Blueprint is first applied, and keeps them in the service's
+# environment.
+services:
+  - type: web
+    name: screen-reader-journeys
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    # The free instance costs nothing, but sleeps after 15 minutes without requests (queued runs
+    # wait until the next request wakes it) and has 512 MB, which Chromium can exceed on large
+    # pages. For regular use choose "standard" (2 GB). See docs/deploy.md.
+    plan: free
+    # Put it near the Supabase project.
+    region: frankfurt
+    # The worker runs one run at a time per instance; keep a single instance.
+    numInstances: 1
+    healthCheckPath: /health
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      # The dashboard's origin, e.g. https://screen-reader-journeys.netlify.app
+      - key: ALLOWED_ORIGINS
+        sync: false
+      # Sites the server may test, comma-separated: exact hosts, or "*." for subdomains, e.g.
+      # *.vercel.app,stem-accessibility.example.org. Empty allows nothing.
+      - key: ALLOWED_TARGET_HOSTS
+        sync: false
+      - key: RUN_TIMEOUT_SECONDS
+        value: "900"
+      - key: POLL_INTERVAL_SECONDS
+        value: "5"
