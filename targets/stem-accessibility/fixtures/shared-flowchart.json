@@ -1,0 +1,23 @@
+{
+  "public_slug": "srj-demo",
+  "title": "Lab 2: Loops",
+  "short_alt": "Flowchart of a loop that asks whether the student is ready.",
+  "summary": "## Overview\n\nA loop that waits until the student is ready.\n\n## Steps\n\n- Start\n- Ask: Ready?\n- Yes: Go\n- No: Wait, then ask again",
+  "has_image": false,
+  "flowchart_type": "flowchart",
+  "published_at": "2026-11-01T12:00:00Z",
+  "json_data": {
+    "nodes": [
+      { "id": "A", "label": "Start", "shape": "ellipse", "coordinates": [[100, 0], [200, 40]] },
+      { "id": "B", "label": "Ready?", "shape": "diamond", "coordinates": [[100, 100], [200, 160]] },
+      { "id": "C", "label": "Go", "shape": "rectangle", "coordinates": [[0, 240], [80, 280]] },
+      { "id": "D", "label": "Wait", "shape": "rectangle", "coordinates": [[220, 240], [300, 280]] }
+    ],
+    "edges": [
+      { "source": "A", "destination": "B", "type": "solid", "arrowheads": ["end"] },
+      { "source": "B", "destination": "C", "type": "solid", "label": "Yes", "arrowheads": ["end"] },
+      { "source": "B", "destination": "D", "type": "solid", "label": "No", "arrowheads": ["end"] },
+      { "source": "D", "destination": "B", "type": "solid", "arrowheads": ["end"] }
+    ]
+  }
+}
