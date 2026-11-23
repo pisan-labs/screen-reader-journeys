@@ -131,6 +131,17 @@ class VirtualDriver extends WalkerDriver {
   }
 }
 
+/**
+ * Screen readers can echo the key just pressed ("tab", "return"). Drop a phrase that is only that
+ * echo, so transcripts show what was said about the page, as in the other modes.
+ */
+export function withoutKeyEcho(phrases, key) {
+  const names = { enter: ["return", "enter"], space: ["space"], " ": ["space"], escape: ["escape", "esc"] };
+  const parts = key.toLowerCase().split("+");
+  const echoes = new Set([parts.join(" "), ...parts.flatMap((p) => names[p] ?? [p]), ...(names[parts.at(-1)] ?? []).map((n) => [...parts.slice(0, -1), n].join(" "))]);
+  return phrases.filter((phrase) => !echoes.has(phrase.trim().toLowerCase()));
+}
+
 /** Shared parts of the real screen readers driven through Guidepup. */
 class GuidepupDriver {
   static headed = true;
@@ -154,15 +165,16 @@ class GuidepupDriver {
   }
 
   async press(key) {
-    await this.sr.press(key);
+    // Full capture: the default keeps only the first phrase, which is often just the key echo.
+    await this.sr.press(key, { capture: true });
     await settle(this.page, 400);
     const focus = await this.focus();
     this.lastFocus = focus;
-    return { focus, spoken: await this.collect() };
+    return { focus, spoken: withoutKeyEcho(await this.collect(), key) };
   }
 
   async next() {
-    await this.sr.next();
+    await this.sr.next({ capture: true });
     return { spoken: await this.collect() };
   }
 
