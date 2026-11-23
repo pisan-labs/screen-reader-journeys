@@ -20,6 +20,8 @@ start from and catches regressions between those tests.
 | `walker` | Each Tab stop's role, name and states from Chromium's accessibility tree (the data screen readers receive), plus live-region announcements. | Anywhere, including Linux CI |
 | `virtual` | An emulated screen reader ([Guidepup Virtual Screen Reader](https://github.com/guidepup/virtual-screen-reader)) inside the page: its speech for each step, and line-by-line reading. | Anywhere, including Linux CI |
 | `voiceover` | Real VoiceOver's speech, through [Guidepup](https://github.com/guidepup/guidepup). Not yet tried on a Mac; see [docs/voiceover.md](docs/voiceover.md). | A logged-in Mac |
+| `orca` | Real Orca (the Linux screen reader) through Guidepup, with Chromium. Needs Guidepup's setup, which supports Ubuntu 26.04 or later; the **Orca** workflow runs it on GitHub's Ubuntu 26.04 runners. | Ubuntu 26.04+, e.g. GitHub Actions |
+| `nvda` | Real NVDA (the most used Windows screen reader) through Guidepup, with Chromium. The **NVDA** workflow runs it on GitHub's Windows runners. | Windows, e.g. GitHub Actions |
 
 Screen readers differ from each other and from these modes, so treat a transcript as "what this
 mode heard", not as what every user hears.
@@ -38,14 +40,28 @@ npx playwright install chromium
 node src/cli.js run targets/stem-accessibility --base-url https://frontend-git-<branch>-stem-accessibility.vercel.app
 ```
 
-The reports go to `reports/`. `summary.md` links one Markdown report per journey and mode (with
-a JSON copy). Each report has the checks, the findings and the transcript. The exit code is 1 if
-a journey failed.
+The reports go to `reports/`. Each journey and mode gets a report with the checks, the findings
+and the transcript. The exit code is 1 if a journey failed.
 
 ```
-srj run [paths...] --base-url URL [--mode walker,virtual] [--out reports] [--headed] [--fail-on error|warning|none]
+srj run [paths...] --base-url URL [--mode walker,virtual] [--format md,json,html] [--out reports] [--headed] [--fail-on error|warning|none]
 srj list [paths...]
 ```
+
+## Report formats
+
+Choose with `--format` (comma-separated; the default is `md,json,html`):
+
+| Format | Files | For |
+|---|---|---|
+| `md` | `<journey>.<mode>.md`, `summary.md` | Reading in a pull request or on GitHub |
+| `json` | `<journey>.<mode>.json` | Other tools; the complete result |
+| `html` | `<journey>.<mode>.html`, `summary.html` | Reading in a browser. Self-contained, accessible (no axe violations, light and dark) |
+| `junit` | `junit.xml` | CI test reports (GitHub, GitLab, Jenkins). Each check is a test case; error findings fail |
+| `sarif` | `results.sarif` | SARIF 2.1.0 viewers. Results point at the page URL, since a rendered page has no source file |
+| `csv` | `findings.csv`, `checks.csv` | Spreadsheets. Cells that would start a formula are prefixed with `'` |
+
+Page text is untrusted, so every format escapes it.
 
 Paths are `*.journey.js` files, or folders to search; the default is `targets/`. `--fail-on
 error` also fails the run when a finding is an error, not only when a journey's checks fail.
@@ -113,6 +129,17 @@ Chromium reports: `button`, `link`, `combobox`, `checkbox`, `heading` and so on.
   The transcripts are kept as a downloadable artifact, and the summary appears on the run's page.
 - **VoiceOver** (`.github/workflows/voiceover.yml`): the same with real VoiceOver, on a Mac
   registered as a self-hosted runner. See [docs/voiceover.md](docs/voiceover.md).
+- **NVDA** (`.github/workflows/nvda.yml`): real NVDA on a GitHub-hosted Windows runner, the same way:
+  the self-test on pull requests that touch the NVDA code, journeys when started by hand.
+- **Orca** (`.github/workflows/orca.yml`): real Orca on a GitHub-hosted Ubuntu 26.04 runner. It runs
+  the Orca self-test on pull requests that touch the Orca code; start it by hand with a site address
+  for journeys. Locally, on Ubuntu 26.04 or later:
+  ```bash
+  npx @guidepup/setup setup --ci
+  ```
+  ```bash
+  xvfb-run -a dbus-run-session -- node src/cli.js run targets/stem-accessibility --base-url URL --mode orca
+  ```
 
 ## As a hosted service
 

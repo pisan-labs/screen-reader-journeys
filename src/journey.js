@@ -220,9 +220,17 @@ export async function runJourney(journey, { mode, baseUrl, headed = false, launc
     pageErrors: [],
     toolErrors: [],
   };
-  const browser = await (Driver.browser === "webkit" ? webkit : chromium).launch({ headless: !(headed || Driver.headed), ...launchOptions });
-  let driver;
+  // A real screen reader may need to run before the browser starts (Orca), so the driver exists
+  // first and gets the page once it is open.
+  const driver = new Driver(null);
+  let browser;
   try {
+    await driver.beforeBrowser?.();
+    browser = await (Driver.browser === "webkit" ? webkit : chromium).launch({
+      headless: !(headed || Driver.headed),
+      ...launchOptions,
+      args: [...(Driver.launchArgs ?? []), ...(launchOptions.args ?? [])],
+    });
     result.browser = `${Driver.browser} ${browser.version()}`;
     const context = await browser.newContext({
       viewport: { width: 1280, height: 900 },
@@ -243,7 +251,7 @@ export async function runJourney(journey, { mode, baseUrl, headed = false, launc
     await page.goto(url, { waitUntil: "networkidle", timeout: 30000 });
     if (journey.ready) await page.locator(journey.ready).first().waitFor({ timeout: 20000 });
     await settle(page, 300);
-    driver = new Driver(page);
+    driver.page = page;
     await driver.start();
     await journey.run(new Session(page, driver, result));
   } catch (error) {
@@ -252,8 +260,8 @@ export async function runJourney(journey, { mode, baseUrl, headed = false, launc
       result.error = error.message.split("\n")[0];
     }
   } finally {
-    await driver?.stop();
-    await browser.close();
+    await driver.stop();
+    await browser?.close();
   }
   if (result.status === "pass" && result.expectations.some((e) => !e.ok)) result.status = "fail";
   return result;

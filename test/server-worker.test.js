@@ -69,7 +69,11 @@ describe("worker, end to end", () => {
     assert.equal(result.report_path, `${run.id}/basic-test-page.walker.md`);
 
     const uploaded = [...fake.uploads.keys()].sort();
-    assert.deepEqual(uploaded, [`reports/${run.id}/basic-test-page.walker.json`, `reports/${run.id}/basic-test-page.walker.md`, `reports/${run.id}/summary.md`]);
+    assert.deepEqual(
+      uploaded,
+      ["basic-test-page.walker.html", "basic-test-page.walker.json", "basic-test-page.walker.md", "summary.html", "summary.md"].map((f) => `reports/${run.id}/${f}`)
+    );
+    assert.equal(fake.uploads.get(`reports/${run.id}/summary.html`).options.contentType, "text/html; charset=utf-8");
     const report = fake.uploads.get(`reports/${run.id}/basic-test-page.walker.md`);
     assert.equal(report.options.contentType, "text/markdown; charset=utf-8");
     assert.match(report.body.toString(), /\| Tab \| Save, button \|/);
@@ -77,7 +81,7 @@ describe("worker, end to end", () => {
 
     assert.deepEqual(
       { ...saved.summary, files: saved.summary.files.length },
-      { results: 1, passed: 1, failed: 0, errored: 0, errors: result.errors, warnings: result.warnings, files: 3, blocked_requests: [], timed_out: false }
+      { results: 1, passed: 1, failed: 0, errored: 0, errors: result.errors, warnings: result.warnings, files: 5, blocked_requests: [], timed_out: false }
     );
     assert.equal(await worker.tick(), false, "the queue is now empty");
   });
