@@ -16,7 +16,7 @@ const USAGE = `Usage:
   srj run [paths...] --base-url URL [--mode walker,virtual] [--out reports] [--headed] [--fail-on error|warning|none]
   srj list [paths...]
 
-Modes: walker (accessibility tree), virtual (emulated screen reader), voiceover (macOS only).`;
+Modes: walker (accessibility tree), virtual (emulated screen reader), voiceover (macOS only), orca (Linux, after Guidepup's setup).`;
 
 async function findJourneys(paths) {
   const files = [];

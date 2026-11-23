@@ -8,6 +8,8 @@
 //              reader that follows focus and live regions and can read the page line by line.
 //   voiceover  Real VoiceOver on macOS through Guidepup, with Playwright's WebKit. Needs a
 //              logged-in Mac set up as described in docs/voiceover.md.
+//   orca       Real Orca on Linux through Guidepup, with Chromium. Needs Guidepup's setup
+//              (Ubuntu 26.04 or later); see .github/workflows/orca.yml.
 
 import { createRequire } from "node:module";
 import { describeFocusChromium, describeFocusPortable, speakFocus } from "./focus.js";
@@ -123,62 +125,97 @@ class VirtualDriver extends WalkerDriver {
   }
 
   async stop() {
-    await this.page.evaluate(() => window.__srjVirtualLib?.virtual.stop()).catch(() => {});
+    await this.page?.evaluate(() => window.__srjVirtualLib?.virtual.stop()).catch(() => {});
   }
 }
 
-class VoiceOverDriver {
-  static id = "voiceover";
-  static label = "VoiceOver (macOS, Playwright WebKit)";
-  static browser = "webkit";
+/** Shared parts of the real screen readers driven through Guidepup. */
+class GuidepupDriver {
   static headed = true;
 
   constructor(page) {
     this.page = page;
   }
 
-  async start() {
-    if (process.platform !== "darwin") throw new Error("The voiceover mode runs only on macOS.");
-    const { voiceOver } = await import("@guidepup/guidepup");
-    const { navigateVoiceOverToWebContent } = await import("./voiceover-web-content.js");
-    this.vo = voiceOver;
-    await voiceOver.start({ capture: "initial" });
-    await navigateVoiceOverToWebContent({ voiceOver, page: this.page, applicationId: "org.webkit.Playwright" });
-    this.seen = (await voiceOver.spokenPhraseLog()).length;
-    this.lastFocus = await describeFocusPortable(this.page);
-  }
+  /** Called before the browser starts (Orca must be running first so Chromium joins its accessibility bus). */
+  async beforeBrowser() {}
 
   focus() {
     return describeFocusPortable(this.page);
   }
 
   async collect() {
-    const log = await this.vo.spokenPhraseLog();
+    const log = await this.sr.spokenPhraseLog();
     const fresh = log.slice(this.seen);
     this.seen = log.length;
     return fresh;
   }
 
   async press(key) {
-    await this.vo.press(key);
+    await this.sr.press(key);
     await settle(this.page, 400);
-    const focus = await describeFocusPortable(this.page);
+    const focus = await this.focus();
     this.lastFocus = focus;
     return { focus, spoken: await this.collect() };
   }
 
   async next() {
-    await this.vo.next();
+    await this.sr.next();
     return { spoken: await this.collect() };
   }
 
   async stop() {
     try {
-      await this.vo?.stop();
+      await this.sr?.stop();
     } catch {
-      // VoiceOver may already be off.
+      // The screen reader may already be off.
     }
   }
 }
 
-export const DRIVERS = { walker: WalkerDriver, virtual: VirtualDriver, voiceover: VoiceOverDriver };
+class VoiceOverDriver extends GuidepupDriver {
+  static id = "voiceover";
+  static label = "VoiceOver (macOS, Playwright WebKit)";
+  static browser = "webkit";
+
+  async start() {
+    if (process.platform !== "darwin") throw new Error("The voiceover mode runs only on macOS.");
+    const { voiceOver } = await import("@guidepup/guidepup");
+    const { navigateVoiceOverToWebContent } = await import("./voiceover-web-content.js");
+    this.sr = voiceOver;
+    await voiceOver.start({ capture: "initial" });
+    await navigateVoiceOverToWebContent({ voiceOver, page: this.page, applicationId: "org.webkit.Playwright" });
+    this.seen = (await voiceOver.spokenPhraseLog()).length;
+    this.lastFocus = await this.focus();
+  }
+}
+
+class OrcaDriver extends GuidepupDriver {
+  static id = "orca";
+  static label = "Orca (Linux, Chromium)";
+  static browser = "chromium";
+  // Chromium builds its accessibility tree for assistive technology only when asked.
+  static launchArgs = ["--force-renderer-accessibility"];
+
+  async beforeBrowser() {
+    if (process.platform !== "linux") throw new Error("The orca mode runs only on Linux.");
+    const { orca } = await import("@guidepup/guidepup");
+    this.sr = orca;
+    await orca.start({ capture: "initial" });
+  }
+
+  async start() {
+    const { navigateOrcaToWebContent } = await import("./orca-web-content.js");
+    this.cdp = await this.page.context().newCDPSession(this.page);
+    await this.cdp.send("Accessibility.enable");
+    await navigateOrcaToWebContent({ orca: this.sr, page: this.page });
+    this.seen = (await this.sr.spokenPhraseLog()).length;
+    this.lastFocus = await this.focus();
+  }
+
+  focus() {
+    return describeFocusChromium(this.page, this.cdp);
+  }
+}
+
+export const DRIVERS = { walker: WalkerDriver, virtual: VirtualDriver, voiceover: VoiceOverDriver, orca: OrcaDriver };

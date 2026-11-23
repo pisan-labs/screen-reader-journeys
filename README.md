@@ -20,6 +20,7 @@ start from and catches regressions between those tests.
 | `walker` | Each Tab stop's role, name and states from Chromium's accessibility tree (the data screen readers receive), plus live-region announcements. | Anywhere, including Linux CI |
 | `virtual` | An emulated screen reader ([Guidepup Virtual Screen Reader](https://github.com/guidepup/virtual-screen-reader)) inside the page: its speech for each step, and line-by-line reading. | Anywhere, including Linux CI |
 | `voiceover` | Real VoiceOver's speech, through [Guidepup](https://github.com/guidepup/guidepup). Not yet tried on a Mac; see [docs/voiceover.md](docs/voiceover.md). | A logged-in Mac |
+| `orca` | Real Orca (the Linux screen reader) through Guidepup, with Chromium. Needs Guidepup's setup, which supports Ubuntu 26.04 or later; the **Orca** workflow runs it on GitHub's Ubuntu 26.04 runners. | Ubuntu 26.04+, e.g. GitHub Actions |
 
 Screen readers differ from each other and from these modes, so treat a transcript as "what this
 mode heard", not as what every user hears.
@@ -113,6 +114,15 @@ Chromium reports: `button`, `link`, `combobox`, `checkbox`, `heading` and so on.
   The transcripts are kept as a downloadable artifact, and the summary appears on the run's page.
 - **VoiceOver** (`.github/workflows/voiceover.yml`): the same with real VoiceOver, on a Mac
   registered as a self-hosted runner. See [docs/voiceover.md](docs/voiceover.md).
+- **Orca** (`.github/workflows/orca.yml`): real Orca on a GitHub-hosted Ubuntu 26.04 runner. It runs
+  the Orca self-test on pull requests that touch the Orca code; start it by hand with a site address
+  for journeys. Locally, on Ubuntu 26.04 or later:
+  ```bash
+  npx @guidepup/setup setup --ci
+  ```
+  ```bash
+  xvfb-run -a dbus-run-session -- node src/cli.js run targets/stem-accessibility --base-url URL --mode orca
+  ```
 
 ## What the automatic findings mean
 

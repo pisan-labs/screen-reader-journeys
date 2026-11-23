@@ -2,7 +2,8 @@
 
 ## @guidepup/playwright
 
-`src/voiceover-web-content.js` is adapted from `lib/navigateVoiceOverToWebContent.js` in
+`src/voiceover-web-content.js` and `src/orca-web-content.js` are adapted from
+`lib/navigateVoiceOverToWebContent.js`, `lib/navigateOrcaToWebContent.js` and `lib/cleanString.js` in
 [@guidepup/playwright](https://github.com/guidepup/guidepup-playwright).
 
 MIT License
