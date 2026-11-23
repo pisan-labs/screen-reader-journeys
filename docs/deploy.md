@@ -255,15 +255,18 @@ domain only you control, where you can.
   - A run left `running` by a service that crashed is marked failed ten minutes after its timeout.
 - **Limits.**
   - Three runs waiting or running per person (`limit_active_runs`).
-  - Per run: at most one result per journey and mode, and at most 200 report files and 20 MiB of
-    reports, of at most 2 MiB each. A file over 2 MiB, with a name the database does not take, or
-    refused by the database, is left out, and the run's summary lists it under `skipped_files`.
-    The run still finishes. NUL characters in a report become U+FFFD.
+  - Per run: one result for each of the run's journeys and modes (a unique constraint), and at
+    most 200 report files and 20 MiB of reports, of at most 2 MiB each.
+  - A file is left out if it is a link or another non-file, is over 2 MiB, has a name the
+    database does not take, or is refused by the database (a cap, a check, or text it cannot
+    hold). The run's summary lists it under `skipped_files`, and the run still finishes. Any
+    other error while saving fails the run. NUL characters in a report become U+FFFD.
 - **Retention** (PManager's decision, 23 November 2026; the privacy note on the page says so):
   - each person keeps their 20 latest runs; queueing a new one deletes their oldest finished
     runs beyond that;
   - finished runs older than 30 days are deleted, by `worker_prune_runs`, which the worker calls
-    about once an hour.
+    about once an hour while the service is awake. A failed prune is logged and does not stop the
+    queue.
 
   Deleting a run, or the account, deletes its results and reports at once.
 - **Logs.** Render's log shows each run starting and ending. The network guard's refusals are
@@ -275,6 +278,13 @@ domain only you control, where you can.
   - The server holds the public anon key and `WORKER_TOKEN`, and never the service-role key.
   - A leaked `WORKER_TOKEN` lets its holder claim, fill in, finish or requeue runs. It cannot read
     anyone's runs, results or reports.
+  - **The run's files are not trusted.** Before the server reads a run's reports, it ends every
+    process of `RUN_AS_UID`, so nothing can change the folder while it is read and nothing
+    outlives the run into the next person's. It ends them again before each run starts. It
+    lists the folder without following links and keeps regular files only. It opens each file
+    with `O_NOFOLLOW`, checks the open handle (a regular file, at most 2 MiB), reads no further
+    than that, and refuses a file whose folder resolves outside the reports folder. So a link to
+    `/proc/self/environ`, or to any file only root can read, is never read (`server/reports.js`).
   - The run process that drives the browser gets only a short list of harmless variables (`PATH`,
     `HOME`, `TMPDIR`, the locale and time zone, `NODE_ENV` and `PLAYWRIGHT_BROWSERS_PATH`). It runs as `runner`, an unprivileged user, while the
     server runs as root. So even a page that breaks out of Chromium cannot read the server's

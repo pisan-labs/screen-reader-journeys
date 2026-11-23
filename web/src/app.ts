@@ -459,6 +459,11 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
   // One run -----------------------------------------------------------------------------------
 
   let pollTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * The current view's number. route() moves it on, so a run page's poll that is waiting for an
+   * answer when the person signs out, or goes elsewhere, stops instead of drawing or polling on.
+   */
+  let generation = 0;
 
   /**
    * Which of a run's report files are there (row level security: your own runs only). Only the
@@ -571,7 +576,11 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
         ? [h('h2', {}, 'Downloads'), h('p', {}, 'Every file the run wrote.'), h('ul', { class: 'files' }, files.map((path) => h('li', {}, download(path, path) ?? path)))]
         : null,
       skipped.length
-        ? [h('h2', {}, 'Files left out'), h('p', {}, 'These files were too large to keep (over 2 MB).'), h('ul', {}, skipped.map((path) => h('li', {}, path)))]
+        ? [
+            h('h2', {}, 'Files not kept'),
+            h('p', {}, 'These files were not kept: too large, too many, or a name or type a report cannot have.'),
+            h('ul', {}, skipped.map((path) => h('li', {}, path))),
+          ]
         : null,
       blocked.length
         ? [
@@ -594,15 +603,17 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
     const details = h('div', {}, h('p', {}, 'Loading the run…'));
     const heading = h('h1', { tabindex: '-1' }, 'Run');
     show('Run', [h('p', {}, h('a', { href: '#/' }, 'Back to runs')), heading, details], { focus });
-    const here = win.location.hash;
+    const mine = generation;
+    const current = () => generation === mine;
     let shown: string | null = null;
 
     async function refresh() {
-      if (win.location.hash !== here) return;
+      if (!current()) return;
       let run: Run;
       try {
         ({ run } = await api<{ run: Run }>(`/runs/${encodeURIComponent(id)}`));
       } catch (error) {
+        if (!current()) return;
         if (shown) {
           // Keep what is on screen and try again: the server may be restarting.
           pollTimer = setTimeout(refresh, pollMs * 2);
@@ -612,7 +623,7 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
         showError((error as Error).message);
         return;
       }
-      if (win.location.hash !== here) return;
+      if (!current()) return;
       const key = `${run.status}|${run.run_results?.length ?? 0}`;
       if (key !== shown) {
         const list = await loadCatalog().catch(() => null);
@@ -620,8 +631,9 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
         try {
           available = await reportFiles(run.id, [...new Set([...(run.summary?.files ?? []), ...(run.run_results ?? []).map((r) => r.report_path).filter((p): p is string => Boolean(p))])]);
         } catch (error) {
-          showError((error as Error).message);
+          if (current()) showError((error as Error).message);
         }
+        if (!current()) return;
         const hadFocus = details.contains(doc.activeElement);
         heading.textContent = `Run on ${hostOf(run.base_url)}`;
         doc.title = `Run on ${hostOf(run.base_url)} – ${SITE}`;
@@ -647,6 +659,7 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
   function route({ focus = true } = {}): Promise<void> | void {
     const hash = win.location.hash;
     if (hash && !hash.startsWith('#/')) return;
+    generation += 1;
     clearTimeout(pollTimer);
     clearError();
     if (!session) return renderSignedOut({ focus });

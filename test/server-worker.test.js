@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import dgram from "node:dgram";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -310,7 +310,7 @@ describe("worker, with a fake run process", () => {
   it("leaves out a file the database refuses or could not name, and still finishes the run", async () => {
     const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
     const fake = fakeSupabase({ runs: [run] });
-    fake.failures.push({ op: "rpc", name: "worker_save_report", error: { message: "A run keeps at most 20 MiB of reports." } });
+    fake.failures.push({ op: "rpc", name: "worker_save_report", error: { code: "54000", message: "A run keeps at most 20 MiB of reports." } });
     const execute = async (job) => {
       await writeFile(join(job.outDir, "a.md"), "first, refused");
       await writeFile(join(job.outDir, "b.md"), "second, kept");
@@ -326,6 +326,94 @@ describe("worker, with a fake run process", () => {
     assert.deepEqual(saved.summary.skipped_files.sort(), [".hidden.md", "a.md", `${"x".repeat(198)}.md`].sort());
     assert.ok(logged.some((line) => /left out a\.md \(worker_save_report: A run keeps at most 20 MiB/.test(line)), logged.join("\n"));
     assert.equal(fake.tables.run_results.length, 1, "the results are kept");
+  });
+
+  it("never follows a link the run left in its reports, to a file or to a folder (R2.1)", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "srj-outside-"));
+    const MARKER = "MARKER-read-only-by-the-server";
+    await writeFile(join(outside, "secret.txt"), MARKER);
+    await writeFile(join(outside, "inside.md"), MARKER);
+    try {
+      const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+      const fake = fakeSupabase({ runs: [run] });
+      const execute = async (job) => {
+        await writeFile(join(job.outDir, "summary.md"), "# Summary");
+        await symlink(join(outside, "secret.txt"), join(job.outDir, "leak.txt"));
+        await symlink("/proc/self/environ", join(job.outDir, "environ.txt"));
+        await symlink(outside, join(job.outDir, "folder"));
+        return { outcome: "done", error: null, results: [summary(BASIC, "walker")], blocked: [] };
+      };
+      await createWorker({ db: dbOf(fake), catalog, config, execute, lookup, log: quiet }).tick();
+      const saved = fake.run(run.id);
+      assert.equal(saved.status, "done");
+      assert.deepEqual(fake.tables.run_reports.map((r) => r.path), ["summary.md"]);
+      assert.deepEqual(saved.summary.skipped_files, ["environ.txt", "folder", "leak.txt"]);
+      assert.ok(!fake.tables.run_reports.some((r) => r.body.includes(MARKER)), "the marker was read");
+      assert.ok(!fake.calls.some((c) => JSON.stringify(c.args ?? {}).includes(MARKER)), "the marker was sent");
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("with RUN_AS_UID, stops that user's processes before the run and before reading its reports", async () => {
+    const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+    const fake = fakeSupabase({ runs: [run] });
+    const events = [];
+    const execute = async () => {
+      events.push("execute");
+      return { outcome: "done", error: null, results: [summary(BASIC, "walker")], blocked: [] };
+    };
+    const stopProcesses = async (uid) => events.push(`stop ${uid}`);
+    // runAs needs root for chown; a uid of our own keeps it working without root.
+    const uid = process.getuid();
+    const own = { ...config, runAs: { uid, gid: process.getgid() } };
+    await createWorker({ db: dbOf(fake), catalog, config: own, execute, lookup, log: quiet, stopProcesses }).tick();
+    assert.deepEqual(events, [`stop ${uid}`, "execute", `stop ${uid}`]);
+    assert.equal(fake.run(run.id).status, "done");
+  });
+
+  it("fails the run, reading nothing, when the run's processes will not stop", async () => {
+    const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+    const fake = fakeSupabase({ runs: [run] });
+    let stops = 0;
+    const stopProcesses = async () => {
+      if (++stops === 2) throw new Error("processes of user 10001 are still running: 99");
+    };
+    const execute = async (job) => {
+      await writeFile(join(job.outDir, "summary.md"), "# Summary");
+      return { outcome: "done", error: null, results: [summary(BASIC, "walker")], blocked: [] };
+    };
+    const own = { ...config, runAs: { uid: process.getuid(), gid: process.getgid() } };
+    await createWorker({ db: dbOf(fake), catalog, config: own, execute, lookup, log: quiet, stopProcesses }).tick();
+    assert.equal(fake.run(run.id).status, "failed");
+    assert.equal(fake.tables.run_reports.length, 0);
+  });
+
+  it("fails the run when saving a report fails for a reason other than a refusal (R2.3)", async () => {
+    const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+    const fake = fakeSupabase({ runs: [run] });
+    fake.failures.push({ op: "rpc", name: "worker_save_report", error: { message: "fetch failed" } });
+    const execute = async (job) => {
+      await writeFile(join(job.outDir, "summary.md"), "# Summary");
+      return { outcome: "done", error: null, results: [summary(BASIC, "walker")], blocked: [] };
+    };
+    await createWorker({ db: dbOf(fake), catalog, config, execute, lookup, log: quiet }).tick();
+    assert.equal(fake.run(run.id).status, "failed");
+    assert.match(fake.run(run.id).error, /^The server could not finish this run\./);
+  });
+
+  it("still claims runs when pruning fails, and tries pruning again an hour later (R2.2)", async () => {
+    const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+    const fake = fakeSupabase({ runs: [run] });
+    fake.failures.push({ op: "rpc", name: "worker_prune_runs", error: { message: "Could not find the function worker_prune_runs" } });
+    const execute = async () => ({ outcome: "done", error: null, results: [summary(BASIC, "walker")], blocked: [] });
+    const errors = [];
+    const worker = createWorker({ db: dbOf(fake), catalog, config, execute, lookup, log: { log() {}, error: (m) => errors.push(m) } });
+    assert.equal(await worker.tick(), true);
+    assert.equal(fake.run(run.id).status, "done");
+    assert.match(errors.join("\n"), /pruning: worker_prune_runs: Could not find the function/);
+    await worker.tick();
+    assert.equal(fake.calls.filter((c) => c.name === "worker_prune_runs").length, 1, "not again at once");
   });
 
   it("deletes finished runs over 30 days old, about once an hour", async () => {

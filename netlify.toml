@@ -35,10 +35,11 @@
     Cross-Origin-Opener-Policy = "same-origin"
     Strict-Transport-Security = "max-age=31536000"
 
-# The page and hw-events.js change with deploys; let browsers check for new versions. Vite's
-# bundles in /assets/ carry a hash in their names, so they never change.
+# hw-events.js, the one script without a hash in its name, changes with deploys; let browsers
+# check for new versions. Vite's bundles in /assets/ carry a hash in their names, so they never
+# change.
 [[headers]]
-  for = "/*.js"
+  for = "/hw-events.js"
   [headers.values]
     Cache-Control = "public, max-age=0, must-revalidate"
 

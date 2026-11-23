@@ -23,3 +23,7 @@ Append-only journal, oldest first. Earlier history: `git log` and `docs/handoff.
 2026-11-23 [code] Review of #10, R1.1 to R1.7: safer report saving, downloads as octet-stream on click, per-run caps, retention (20 runs, 30 days, proposed), clock-free SQL test, ASCII token rule.
 
 2026-11-23 [decision] PManager: retention and caps as proposed (20 runs per person, 30 days, 200 files, 20 MiB per run); the privacy note says so.
+
+2026-11-23 [code] Review of #11, R2.1 (major): the worker stops RUN_AS_UID's processes, lists without following links and opens reports with O_NOFOLLOW; R2.2-R2.4, R2.6-R2.8 fixed; R2.5 to PR 3.
+
+2026-11-23 [code] run_results: unique (run_id, journey, mode), and results must be for the run's own journeys and modes.

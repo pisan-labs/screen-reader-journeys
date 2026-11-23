@@ -214,17 +214,22 @@ select test.check(app_screen_reader_journeys.worker_save_report(test.token(), :'
 select test.fails(format($$select app_screen_reader_journeys.worker_save_report(test.token(), %L, '../etc/passwd', 'text/plain', 'x')$$, :'run_a'), 'check constraint');
 select test.fails(format($$select app_screen_reader_journeys.worker_save_report(test.token(), %L, '/abs.md', 'text/plain', 'x')$$, :'run_a'), 'check constraint');
 select test.check(not app_screen_reader_journeys.worker_save_report(test.token(), :'run_queued', 'summary.md', 'text/markdown', 'x'), 'a queued run takes no reports');
-select test.fails(format($$select app_screen_reader_journeys.worker_add_results(test.token(), %L, '[{"journey": "x", "mode": "voiceover", "status": "pass"}]')$$, :'run_a'), 'check constraint');
+-- A mode the run does not have (and the table would refuse anyway).
+select test.fails(format($$select app_screen_reader_journeys.worker_add_results(test.token(), %L, '[{"journey": "targets/generic/home-tab-order.journey.js", "mode": "voiceover", "status": "pass"}]')$$, :'run_a'), 'one of the run''s journeys and modes');
+select test.fails(format($$select app_screen_reader_journeys.worker_add_results(test.token(), %L, '[{"journey": "targets/generic/home-tab-order.journey.js", "mode": "walker", "status": "maybe"}]')$$, :'run_a'), 'check constraint');
 select test.check(app_screen_reader_journeys.worker_add_results(test.token(), :'run_a',
   '[{"journey": "targets/generic/home-tab-order.journey.js", "mode": "walker", "status": "pass", "checks_passed": 1, "checks_total": 1, "errors": 0, "warnings": 2, "report_path": "home-page-tab-order.walker.md"}]') = 1, 'one result added');
 select test.check(app_screen_reader_journeys.worker_add_results(test.token(), :'run_queued', '[{"journey": "x", "mode": "walker", "status": "pass"}]') = 0, 'a queued run takes no results');
 select test.fails($$select app_screen_reader_journeys.worker_add_results(test.token(), gen_random_uuid(), '{}')$$, 'json array');
 commit;
-\echo 'per run: at most one result per journey and mode, 200 files and 20 MiB of reports'
+\echo 'per run: one result per journey and mode of the run, 200 files and 20 MiB of reports'
 begin;
 select test.act_as('anon');
 -- run_a has 1 journey and 1 mode, and already has its one result.
-select test.fails(format($$select app_screen_reader_journeys.worker_add_results(test.token(), %L, '[{"journey": "x", "mode": "walker", "status": "pass"}]')$$, :'run_a'), 'one result per journey and mode');
+select test.fails(format($$select app_screen_reader_journeys.worker_add_results(test.token(), %L, '[{"journey": "targets/generic/home-tab-order.journey.js", "mode": "walker", "status": "fail"}]')$$, :'run_a'), 'run_results_one_per_journey_mode');
+select test.fails(format($$select app_screen_reader_journeys.worker_add_results(test.token(), %L, '[{"journey": "x", "mode": "walker", "status": "pass"}]')$$, :'run_a'), 'one of the run''s journeys and modes');
+select test.fails(format($$select app_screen_reader_journeys.worker_add_results(test.token(), %L, '[{"journey": "targets/generic/home-tab-order.journey.js", "mode": "virtual", "status": "pass"}]')$$, :'run_a'), 'one of the run''s journeys and modes');
+select test.fails(format($$select app_screen_reader_journeys.worker_add_results(test.token(), %L, '[{"mode": "walker", "status": "pass"}]')$$, :'run_a'), 'one of the run''s journeys and modes');
 select test.fails(format($$select app_screen_reader_journeys.worker_save_report(test.token(), %L, 'big.md', 'text/markdown', repeat('x', 2097153))$$, :'run_a'), 'check constraint');
 select app_screen_reader_journeys.worker_save_report(test.token(), :'run_a', 'f' || n || '.md', 'text/plain', repeat('x', 2097152)) from generate_series(1, 9) n;
 select test.fails(format($$select app_screen_reader_journeys.worker_save_report(test.token(), %L, 'f10.md', 'text/plain', repeat('x', 2097152))$$, :'run_a'), 'at most 20 MiB');
@@ -317,7 +322,7 @@ begin;
 select test.act_as('anon');
 create temporary table claimed on commit drop as select * from app_screen_reader_journeys.worker_claim_next_run(test.token());
 select app_screen_reader_journeys.worker_save_report(test.token(), (select id from claimed), 'summary.md', 'text/markdown', 'x');
-select app_screen_reader_journeys.worker_add_results(test.token(), (select id from claimed), '[{"journey": "x", "mode": "walker", "status": "pass"}]');
+select app_screen_reader_journeys.worker_add_results(test.token(), (select id from claimed), '[{"journey": "targets/generic/home-tab-order.journey.js", "mode": "walker", "status": "pass"}]');
 commit;
 delete from auth.users where id = '00000000-0000-4000-8000-00000000000a';
 select test.check((select count(*) from runs where user_id = '00000000-0000-4000-8000-00000000000a') = 0, 'A''s runs are gone');

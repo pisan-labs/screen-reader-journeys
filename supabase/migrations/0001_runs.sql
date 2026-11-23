@@ -11,8 +11,8 @@
 --   anonymous         nothing else
 --
 -- Limits (proposed; the owner may change them):
---   per run     at most 200 report files and 20 MiB of reports in all (2 MiB each), and at
---               most one result per journey and mode
+--   per run     at most 200 report files and 20 MiB of reports in all (2 MiB each), and one
+--               result per journey and mode of the run (a unique constraint)
 --   retention   each person keeps their 20 latest runs; finished runs older than 30 days are
 --               deleted (worker_prune_runs, which the worker calls about once an hour)
 --
@@ -64,7 +64,9 @@ create table if not exists app_screen_reader_journeys.run_results (
   errors        integer not null default 0 check (errors >= 0),
   warnings      integer not null default 0 check (warnings >= 0),
   -- The Markdown report in run_reports, e.g. 'home-page-tab-order.walker.md'.
-  report_path   text check (char_length(report_path) <= 200)
+  report_path   text check (char_length(report_path) <= 200),
+  -- One result per journey and mode of a run.
+  constraint run_results_one_per_journey_mode unique (run_id, journey, mode)
 );
 
 create index if not exists run_results_run_id_idx on app_screen_reader_journeys.run_results (run_id);
@@ -330,8 +332,9 @@ $$;
 
 -- Record a running run's results: a JSON array of
 -- { journey, mode, status, checks_passed, checks_total, errors, warnings, report_path }.
--- At most one result per journey and mode of the run in all. Returns how many rows were added
--- (0 when the run is not running).
+-- Each must be for one of the run's own journeys and modes, and there is at most one result per
+-- journey and mode (the unique constraint). Returns how many rows were added (0 when the run is
+-- not running).
 create or replace function app_screen_reader_journeys.worker_add_results(p_token text, p_run_id uuid, p_results jsonb)
 returns integer
 language plpgsql
@@ -341,22 +344,25 @@ set search_path = ''
 as $$
 declare
   v_user uuid;
-  v_most integer;
+  v_journeys text[];
+  v_modes text[];
   v_count integer;
 begin
   perform app_screen_reader_journeys.worker_token_ok(p_token);
   if p_results is null or pg_catalog.jsonb_typeof(p_results) <> 'array' or pg_catalog.jsonb_array_length(p_results) > 200 then
     raise exception 'p_results must be a JSON array of at most 200 results.' using errcode = '22023';
   end if;
-  select r.user_id, pg_catalog.cardinality(r.journeys) * pg_catalog.cardinality(r.modes) into v_user, v_most
+  select r.user_id, r.journeys, r.modes into v_user, v_journeys, v_modes
     from app_screen_reader_journeys.runs r
    where r.id = p_run_id and r.status = 'running';
   if v_user is null then
     return 0;
   end if;
-  if (select count(*) from app_screen_reader_journeys.run_results x where x.run_id = p_run_id)
-     + pg_catalog.jsonb_array_length(p_results) > v_most then
-    raise exception 'A run keeps at most one result per journey and mode.' using errcode = '54000';
+  if exists (
+    select 1 from pg_catalog.jsonb_to_recordset(p_results) as x(journey text, mode text)
+     where x.journey is null or x.mode is null or not (x.journey = any (v_journeys)) or not (x.mode = any (v_modes))
+  ) then
+    raise exception 'A result must be for one of the run''s journeys and modes.' using errcode = '54000';
   end if;
   insert into app_screen_reader_journeys.run_results
     (run_id, user_id, journey, mode, status, checks_passed, checks_total, errors, warnings, report_path)

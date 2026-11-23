@@ -13,7 +13,7 @@ export const SCHEMA = "app_screen_reader_journeys";
 export function workerDb(client, token) {
   async function call(fn, args = {}) {
     const { data, error } = await client.rpc(fn, { p_token: token, ...args });
-    if (error) throw new Error(`${fn}: ${error.message}`);
+    if (error) throw Object.assign(new Error(`${fn}: ${error.message}`), { code: error.code });
     return data;
   }
 

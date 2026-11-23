@@ -2,12 +2,13 @@
 // results. One run at a time. `db` is workerDb() from worker-db.js: the token-checked worker_*
 // functions, and nothing else (or a fake with the same methods, in the tests).
 
-import { chown, mkdir, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
+import { chown, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { extname, join, sep } from "node:path";
+import { extname, join } from "node:path";
 import { findJourney } from "./catalog.js";
 import { executeRun } from "./execute.js";
 import { resolveEgress } from "./hosts.js";
+import { listReportFiles, readReportFile, stopUserProcesses } from "./reports.js";
 import { validateRunRequest } from "./validate.js";
 
 /** A report larger than this is left out (the database refuses it); the summary says so. */
@@ -18,6 +19,12 @@ const REPORT_PATH = /^[A-Za-z0-9][A-Za-z0-9._-]*(\/[A-Za-z0-9][A-Za-z0-9._-]*)*$
 
 /** How often the worker deletes finished runs over 30 days old. */
 const PRUNE_EVERY_MS = 60 * 60 * 1000;
+
+/**
+ * The database's refusals of one report, which leave that file out: a per-run cap (54000), a
+ * check constraint (23514), and text it cannot hold (22P05). Any other error fails the run.
+ */
+const REFUSALS = new Set(["54000", "23514", "22P05"]);
 
 /** A run still "running" this long after its timeout belonged to a server that stopped. */
 const STALE_GRACE_MS = 10 * 60 * 1000;
@@ -37,14 +44,6 @@ const short = (text, max = 500) => {
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 };
 
-async function listFiles(dir) {
-  const files = [];
-  for (const entry of await readdir(dir, { recursive: true })) {
-    if ((await stat(join(dir, entry))).isFile()) files.push(entry.split(sep).join("/"));
-  }
-  return files.sort();
-}
-
 export function summarizeRun({ results, blocked, outcome }, files, skipped = []) {
   return {
     results: results.length,
@@ -60,7 +59,7 @@ export function summarizeRun({ results, blocked, outcome }, files, skipped = [])
   };
 }
 
-export function createWorker({ db, catalog, config, execute = executeRun, lookup, log = console }) {
+export function createWorker({ db, catalog, config, execute = executeRun, lookup, log = console, stopProcesses = (uid) => stopUserProcesses(uid) }) {
   let stopping = false;
   let loop = null;
   let current = null; // AbortController of the run in progress
@@ -73,11 +72,19 @@ export function createWorker({ db, catalog, config, execute = executeRun, lookup
     log.log(`run ${run.id}: ${fields.status}${fields.error ? ` (${fields.error})` : ""}`);
   }
 
+  /** With RUN_AS_UID, end every process of that user: nothing of a run may outlive it. */
+  async function stopRunProcesses() {
+    if (config.runAs) await stopProcesses(config.runAs.uid);
+  }
+
   /**
    * Save each report file the run wrote. Resolves to the saved paths and the ones left out. A
-   * file the database will not take is left out, never a reason to fail a run that finished.
-   * The run's process wrote these files, so they are not trusted: a file's size is checked
-   * before it is read, and its name before it is sent.
+   * file the database refuses is left out, never a reason to fail a run that finished.
+   *
+   * The run's process wrote these files, so they are not trusted (reports.js): by now none of
+   * its processes is left; links, FIFOs and other non-files are left out; and each file is
+   * opened without following links, its size checked on the open handle and read no further
+   * than the limit. Its name is checked before it is sent.
    */
   async function saveReports(runId, dir) {
     const saved = [];
@@ -86,7 +93,9 @@ export function createWorker({ db, catalog, config, execute = executeRun, lookup
       skipped.push(file);
       log.log(`run ${runId}: left out ${file} (${why})`);
     };
-    for (const file of await listFiles(dir)) {
+    const { files, others } = await listReportFiles(dir);
+    for (const file of others) leaveOut(file, "a link or other non-file");
+    for (const file of files) {
       const type = CONTENT_TYPES[extname(file)];
       if (!type) {
         leaveOut(file, "not a report type");
@@ -96,23 +105,26 @@ export function createWorker({ db, catalog, config, execute = executeRun, lookup
         leaveOut(file, "a name the database does not take");
         continue;
       }
-      if ((await stat(join(dir, file))).size > MAX_REPORT_BYTES) {
-        leaveOut(file, "too large");
+      const read = await readReportFile(dir, file, MAX_REPORT_BYTES);
+      if ("refused" in read) {
+        leaveOut(file, read.refused);
         continue;
       }
       // A text column cannot hold U+0000, which a tested page can put in an accessible name;
       // replace it as an HTML parser would.
-      const body = (await readFile(join(dir, file), "utf8")).replaceAll("\u0000", "\uFFFD");
+      const body = read.text.replaceAll("\u0000", "\uFFFD");
       let kept;
       try {
         kept = await db.saveReport(runId, file, type, body);
       } catch (error) {
+        if (!REFUSALS.has(error.code)) throw error;
         leaveOut(file, error.message);
         continue;
       }
       if (!kept) break; // the run was deleted
       saved.push(file);
     }
+    skipped.sort();
     return { saved, skipped };
   }
 
@@ -163,6 +175,8 @@ export function createWorker({ db, catalog, config, execute = executeRun, lookup
       const egress = await resolveEgress(target.hostname, Number(target.port || (target.protocol === "https:" ? 443 : 80)), config.targetRules, lookup);
       if (!egress.ok) return await finish(run, { status: "failed", error: `Refused: ${egress.reason}.` });
 
+      // A process left by an earlier run could otherwise write into this person's folder.
+      await stopRunProcesses();
       const dirs = await makeWorkDir();
       workDir = dirs.workDir;
       const outDir = dirs.outDir;
@@ -182,6 +196,8 @@ export function createWorker({ db, catalog, config, execute = executeRun, lookup
         log.log(`run ${run.id}: requeued`);
         return;
       }
+      // Nothing may write into the folder while it is read.
+      await stopRunProcesses();
       const { saved: files, skipped } = await saveReports(run.id, outDir);
       await recordResults(run.id, outcome.results, files);
       const summary = summarizeRun(outcome, files, skipped);
@@ -205,12 +221,16 @@ export function createWorker({ db, catalog, config, execute = executeRun, lookup
   }
 
   let prunedAt = 0;
-  /** Retention, about once an hour: a failure is logged and tried again at the next tick. */
+  /** Retention, about once an hour. A failure is logged and tried an hour later; runs are still claimed. */
   async function prune() {
     if (Date.now() - prunedAt < PRUNE_EVERY_MS) return;
-    const count = await db.pruneRuns();
     prunedAt = Date.now();
-    if (count) log.log(`pruned ${count} finished runs over 30 days old`);
+    try {
+      const count = await db.pruneRuns();
+      if (count) log.log(`pruned ${count} finished runs over 30 days old`);
+    } catch (error) {
+      log.error(`pruning: ${error.message}`);
+    }
   }
 
   /** Claim and process one run. Resolves to true if there was one. */

@@ -344,7 +344,7 @@ describe('the dashboard', () => {
     const button = [...view().querySelectorAll('button')].find((b) => b.textContent?.startsWith('Download'))!;
     expect(button.textContent).toBe('Download the report for Home page: Tab order, Keyboard walker');
     expect(view().textContent).not.toMatch(/The server sleeps/);
-    expect(view().textContent).toMatch(/Files left out.*huge\.json/);
+    expect(view().textContent).toMatch(/Files not kept.*too large, too many, or a name or type a report cannot have.*huge\.json/);
     expect(view().textContent).toMatch(/Blocked requests.*10\.0\.0\.1:80/);
     expect(view().textContent).toMatch(/2 of 2.*1 error, 0 warnings/);
   });
@@ -391,6 +391,28 @@ describe('the dashboard', () => {
       table === 'run_reports' ? { select: () => ({ eq: () => ({ in: async () => ({ data: [], error: null }) }) }) } : (original as (t: string) => unknown)(table);
     [...view().querySelectorAll<HTMLButtonElement>('.files button')][0].click();
     await until(() => alertText().includes('The report could not be downloaded: it is no longer there'), 'the error');
+  });
+
+  it('stops polling a run when the person signs out, even with an answer still on its way (R2.6)', async () => {
+    let release: () => void = () => {};
+    const { fetch, signIn } = await setup({
+      hash: `#/runs/${RUN_ID}`,
+      answers: { [`GET /runs/${RUN_ID}`]: { status: 200, body: { run: run({ status: 'running', summary: null, run_results: [] }) } } },
+    });
+    const reads = () => fetch.mock.calls.filter(([url]) => String(url).endsWith(`/runs/${RUN_ID}`)).length;
+    // Hold the next answer until after the sign-out.
+    const original = fetch.getMockImplementation()!;
+    fetch.mockImplementation(async (url, init) => {
+      if (String(url).endsWith(`/runs/${RUN_ID}`)) await new Promise<void>((resolve) => (release = resolve));
+      return original(url, init);
+    });
+    await until(() => reads() === 2, 'the second poll');
+    signIn(null);
+    await until(() => view().textContent!.includes('Sign in at the top'), 'the signed-out view');
+    release();
+    await tick(30);
+    expect(reads()).toBe(2);
+    expect(view().textContent).toMatch(/Sign in at the top/);
   });
 
   it('shows a failed run, and one with no results', async () => {
