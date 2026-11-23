@@ -1,0 +1,18 @@
+{
+  "name": "screen-reader-journeys-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The hosted service's dashboard: sign in, start runs, read results. Built for Netlify.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "node --env-file-if-exists=../.env build.mjs --serve"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "2.118.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

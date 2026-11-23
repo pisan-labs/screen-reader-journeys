@@ -1,0 +1,12 @@
+# Only package*.json, src/, server/ and targets/ go into the image; keep the build context small
+# and keep local secrets out of it.
+.git
+.github
+node_modules
+web
+docs
+test
+supabase
+reports
+.env
+.env.*

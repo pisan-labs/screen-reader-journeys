@@ -19,5 +19,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium
-      # Runs the walker and virtual modes against test/fixtures/basic.html.
+      # Runs the walker and virtual modes against test/fixtures/basic.html, and tests the hosted
+      # service's server and dashboard.
       - run: npm test
+      # Applies supabase/migrations to a throwaway PostgreSQL (preinstalled on the runner) and
+      # checks its policies and queue.
+      - run: npm run test:sql

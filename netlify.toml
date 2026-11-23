@@ -1,0 +1,30 @@
+# Netlify settings for the dashboard (web/). docs/deploy.md walks through the set-up.
+# Set VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY and VITE_API_URL in the site's environment
+# variables; the build fails without them.
+
+[build]
+  base = "web"
+  # Relative to base.
+  publish = "dist"
+  command = "npm run build"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+# Security headers for every response. The Content-Security-Policy is not here: the build writes
+# it to dist/_headers, because it names this deployment's Supabase project and API exactly.
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    X-Frame-Options = "DENY"
+    Referrer-Policy = "no-referrer"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()"
+    Cross-Origin-Opener-Policy = "same-origin"
+    Strict-Transport-Security = "max-age=31536000"
+
+# The page and its config change with every deploy; let browsers check for new versions.
+[[headers]]
+  for = "/*.js"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"

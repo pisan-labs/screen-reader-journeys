@@ -196,8 +196,12 @@ class Session {
   }
 }
 
-/** Run one journey in one mode. `baseUrl` is the site under test, e.g. a pull request's preview. */
-export async function runJourney(journey, { mode, baseUrl, headed = false }) {
+/**
+ * Run one journey in one mode. `baseUrl` is the site under test, e.g. a pull request's preview.
+ * `launchOptions` go to Playwright's browser launch (the hosted server uses them for its network
+ * guard proxy).
+ */
+export async function runJourney(journey, { mode, baseUrl, headed = false, launchOptions = {} }) {
   const Driver = DRIVERS[mode];
   if (!Driver) throw new Error(`Unknown mode "${mode}". Modes: ${Object.keys(DRIVERS).join(", ")}`);
   const url = new URL(journey.start, baseUrl).href;
@@ -224,7 +228,8 @@ export async function runJourney(journey, { mode, baseUrl, headed = false }) {
     await driver.beforeBrowser?.();
     browser = await (Driver.browser === "webkit" ? webkit : chromium).launch({
       headless: !(headed || Driver.headed),
-      args: Driver.launchArgs ?? [],
+      ...launchOptions,
+      args: [...(Driver.launchArgs ?? []), ...(launchOptions.args ?? [])],
     });
     result.browser = `${Driver.browser} ${browser.version()}`;
     const context = await browser.newContext({
