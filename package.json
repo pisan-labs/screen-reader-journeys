@@ -1,0 +1,23 @@
+{
+  "name": "screen-reader-journeys",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Walk a website the way a keyboard and screen reader user does, and write down what they would hear.",
+  "type": "module",
+  "bin": {
+    "srj": "./src/cli.js"
+  },
+  "engines": {
+    "node": ">=20.10"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "srj": "node src/cli.js"
+  },
+  "dependencies": {
+    "@guidepup/guidepup": "0.40.0",
+    "@guidepup/virtual-screen-reader": "0.33.0",
+    "esbuild": "0.28.2",
+    "playwright": "1.63.0"
+  }
+}
