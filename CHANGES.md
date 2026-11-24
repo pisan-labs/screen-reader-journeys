@@ -69,3 +69,5 @@ Append-only journal, oldest first. Earlier history: `git log` and `docs/handoff.
 2026-11-24 [decision] PManager: daily cap 10 per UTC day, one constant (daily_run_limit()); 80/443 for hosts not listed exactly in every mode; R6.2 folded into this PR.
 
 2026-11-24 [code] R6.2: the run process's messages are checked (shape, counts, strings), text made well formed and cut from bounded slices, names quoted in the log.
+
+2026-11-24 [code] #17 round 1: total of 40 runs a day (0002), 100 MB per run through the proxy, results bound to the job, quoted output, no ports on wildcard rules (R7.2 to R7.6).

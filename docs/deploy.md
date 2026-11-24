@@ -57,9 +57,11 @@ releases, and each production step waits for the owner's yes.
      `worker_requeue_run`, `worker_save_report`, `worker_add_results` and `worker_finish_run`.
      Each checks the token's SHA-256 against `worker_config` and refuses every token until that
      row exists.
-   - **`run_counts`** (0002). How many runs each person started per UTC day, for the limit of 10
-     a day. Only a trigger writes it; nobody reads or changes it through the API, so deleting
-     one's runs does not reset it. It keeps today and yesterday.
+   - **`run_counts` and `run_totals`** (0002). How many runs each person, and everyone together,
+     started per UTC day, for the limits of 10 and 40 a day (`daily_run_limit()` and
+     `daily_total_limit()`, one line each to change). Only a trigger writes them; nobody reads or
+     changes them through the API, so deleting one's runs does not reset them, and deleting an
+     account does not lower the total. They keep today and yesterday, for everyone.
 2. **Expose the schema** to the Data API (`expose-schema app_screen_reader_journeys`). Until then,
    PostgREST answers 406 for every request.
 3. **`check-schema app_screen_reader_journeys`** must pass before the first deploy.
@@ -264,8 +266,8 @@ browser makes (redirects and subresources included):
 - ports other than 80 and 443.
 
 `*` never makes a host "listed exactly": everything it admits is checked like that. A person may
-also start at most 10 runs a day (UTC, `0002_daily_cap.sql`), and have at most 3 waiting or
-running.
+also start at most 10 runs a day (UTC, `0002_daily_cap.sql`), everyone together 40, and a person
+may have at most 3 waiting or running. A run may move at most 100 MB through the proxy.
 
 The server also refuses:
 
@@ -273,7 +275,8 @@ The server also refuses:
 - IP addresses and `localhost`, unless listed exactly (under `*`, public IP addresses are
   allowed);
 - for a connection to a host that is not listed exactly, any port but 80 and 443, in every mode,
-  so a tested page cannot use the server to reach other services on public hosts;
+  so a tested page cannot use the server to reach other services on public hosts (so a wildcard
+  rule may not name a port either);
 - journeys that are not files in its own `targets/`. People choose journeys by path, so the
   server never runs code a person sends.
 
@@ -295,8 +298,10 @@ domain only you control, where you can.
   - When Render restarts the service (a deploy, say), the run in progress goes back in the queue.
   - A run left `running` by a service that crashed is marked failed ten minutes after its timeout.
 - **Limits.**
-  - Three runs waiting or running per person (`limit_active_runs`), and ten started per UTC day
-    (`limit_daily_runs`, 0002). Both answer 429 with the reason.
+  - Three runs waiting or running per person (`limit_active_runs`); ten started per UTC day per
+    person, and forty in all (`limit_daily_runs`, 0002). Each answers 429 with the reason.
+  - Per run, through the network guard: at most 100 MB, both directions together. Then every
+    connection is closed and new ones are refused, and the run's blocked requests say so.
   - Per run: one result for each of the run's journeys and modes (a unique constraint), and at
     most 200 report files and 20 MiB of reports, of at most 2 MiB each.
   - A file is left out if it is a link or another non-file, is over 2 MiB, has a name the
@@ -392,6 +397,10 @@ domain only you control, where you can.
   - Requests that a journey's own `setup` answers (the STEM-Accessibility mock) never leave the
     browser, so mocks still work.
   - QUIC is turned off, and WebRTC may not use UDP, since neither would go through the proxy.
+  - What the run process sends back is checked: results only for the run's own journeys and
+    modes, of the right shape; nothing after it is done, has failed or has sent something
+    malformed (which ends the run as an error). Its own output reaches the log quoted, one line
+    at a time, at most 2000 characters a line and 1000 lines a run.
 - **Chromium's sandbox** is off by default, because it cannot start inside a standard Docker
   container (Render's included).
   - A Chromium exploit in a tested page would therefore run as `runner` inside the container. It
