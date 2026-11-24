@@ -9,10 +9,22 @@
 // changed), this child can only read or delete what that user may anyway. The server never
 // reads or deletes the run's files as root.
 
-import { readdir, rm } from "node:fs/promises";
+import { chmod, lstat, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { listReportFiles, readReportFile } from "./reports.js";
+
+/**
+ * Make a folder of this user's, and every folder below it, writable and searchable by its owner,
+ * so that rm can empty it (a folder the run made read-only would otherwise stay). Links are not
+ * followed, and what this user does not own is left as it is.
+ */
+async function makeRemovable(path) {
+  const info = await lstat(path).catch(() => null);
+  if (!info?.isDirectory() || info.isSymbolicLink()) return;
+  await chmod(path, 0o700).catch(() => {});
+  for (const name of await readdir(path).catch(() => [])) await makeRemovable(join(path, name));
+}
 
 /** Remove everything inside each folder (not the folder itself), as this process's user. */
 export async function clearFolders(dirs) {
@@ -27,6 +39,7 @@ export async function clearFolders(dirs) {
     }
     for (const name of names) {
       try {
+        await makeRemovable(join(dir, name));
         await rm(join(dir, name), { recursive: true, force: true });
       } catch {
         left.push(join(dir, name));

@@ -2,7 +2,7 @@
 // results. One run at a time. `db` is workerDb() from worker-db.js: the token-checked worker_*
 // functions, and nothing else (or a fake with the same methods, in the tests).
 
-import { chmod, chown, mkdir, mkdtemp, rm, rmdir } from "node:fs/promises";
+import { chmod, chown, lstat, mkdir, mkdtemp, rm, rmdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 import { findJourney } from "./catalog.js";
@@ -17,6 +17,20 @@ export const MAX_REPORT_BYTES = 2 * 1024 * 1024;
 
 /** The report paths the database takes (run_reports.path's check). */
 const REPORT_PATH = /^[A-Za-z0-9][A-Za-z0-9._-]*(\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/;
+
+/** How long reading all of a run's reports through the run user's child may take, in all. */
+export const READ_LIMIT_MS = 120 * 1000;
+
+/** A list of paths as the run user's child may answer it: relative, short, no "..", no NUL. */
+function pathList(value, what) {
+  if (!Array.isArray(value) || value.length > 100000) throw new Error(`report child: ${what} is not a list of paths`);
+  for (const path of value) {
+    if (typeof path !== "string" || path === "" || path.length > 4096 || path.includes("\0") || path.startsWith("/") || path.split("/").includes("..")) {
+      throw new Error(`report child: ${what} holds a path it may not: ${JSON.stringify(String(path).slice(0, 100))}`);
+    }
+  }
+  return value;
+}
 
 /** How often the worker deletes finished runs over 30 days old. */
 const PRUNE_EVERY_MS = 60 * 60 * 1000;
@@ -70,6 +84,7 @@ export function createWorker({
   stopProcesses = (runAs) => stopUserProcesses(runAs.uid, { gid: runAs.gid }),
   exit = (code) => process.exit(code),
   startChild = startReportChild,
+  readLimitMs = READ_LIMIT_MS,
 }) {
   let stopping = false;
   let loop = null;
@@ -104,10 +119,27 @@ export function createWorker({
       };
     }
     const child = startChild(config.runAs);
+    // The child's answers are checked before anything is done with them.
     return {
-      list: (dir) => child.call({ op: "list", dir }),
-      read: (dir, path, options) => child.call({ op: "read", dir, path, maxBytes: MAX_REPORT_BYTES, ...options }),
-      clear: (dirs) => child.call({ op: "clear", dirs }),
+      async list(dir) {
+        const value = await child.call({ op: "list", dir });
+        if (!value || typeof value !== "object") throw new Error("report child: the listing is not an object");
+        return { files: pathList(value.files, "the listing's files"), others: pathList(value.others, "the listing's other entries") };
+      },
+      async read(dir, path, options) {
+        const value = await child.call({ op: "read", dir, path, maxBytes: MAX_REPORT_BYTES, ...options });
+        if (value && typeof value.text === "string" && value.text.length <= MAX_REPORT_BYTES) return { text: value.text };
+        if (value && typeof value.refused === "string" && value.refused.length <= 200) return { refused: value.refused };
+        throw new Error(`report child: a malformed answer for ${path}`);
+      },
+      async clear(dirs) {
+        const value = await child.call({ op: "clear", dirs });
+        const left = Array.isArray(value?.left) ? value.left : null;
+        if (!left || !left.every((p) => typeof p === "string" && dirs.some((dir) => p === dir || p.startsWith(`${dir}/`)))) {
+          throw new Error("report child: a malformed answer to clear");
+        }
+        return { left };
+      },
       close: () => child.close(),
     };
   }
@@ -123,9 +155,13 @@ export function createWorker({
    */
   async function saveReports(runId, dir, { realRoot, uid }) {
     const access = reportAccess();
+    // One limit for the whole read, not only for each request: when it passes, the child is
+    // ended, its pending answer fails, and so does the run.
+    const limit = setTimeout(() => access.close(), readLimitMs);
     try {
       return await saveReportsWith(access, runId, dir, { realRoot, uid });
     } finally {
+      clearTimeout(limit);
       access.close();
     }
   }
@@ -212,24 +248,56 @@ export function createWorker({
   /**
    * Remove a run's work folder. With RUN_AS_UID, the run user's child empties reports/ and home/,
    * and root then removes the three folders one at a time with rmdir, which never follows a link
-   * and fails on a folder that is not empty: whatever is left stays, and is logged.
+   * and fails on a folder that is not empty. Resolves to false if anything is left: what the run
+   * left would stay in /tmp as that user's, for later runs to read, so the caller then ends the
+   * server (and with it the container, and /tmp).
    */
   async function removeWorkDir(runId, made, workDir) {
     if (!config.runAs || !made) {
       await rm(workDir, { recursive: true, force: true }).catch((error) => log.error(`run ${runId}: removing its folder: ${error.message}`));
-      return;
+      return true;
     }
-    const access = reportAccess();
+    let access = null;
     try {
+      access = reportAccess();
       const { left } = await access.clear([made.outDir, made.home]);
-      if (left.length) log.error(`run ${runId}: could not remove ${left.length} of its files`);
+      if (left.length) {
+        log.error(`run ${runId}: could not remove ${left.length} of its files`);
+        await lockAway(runId, made);
+        return false;
+      }
     } catch (error) {
       log.error(`run ${runId}: emptying its folders: ${error.message}`);
+      await lockAway(runId, made);
+      return false;
     } finally {
-      access.close();
+      access?.close();
     }
+    let removed = true;
     for (const dir of [made.outDir, made.home, workDir]) {
-      await rmdir(dir).catch((error) => log.error(`run ${runId}: removing ${dir}: ${error.code ?? error.message}`));
+      await rmdir(dir).catch((error) => {
+        removed = false;
+        log.error(`run ${runId}: removing ${dir}: ${error.code ?? error.message}`);
+      });
+    }
+    return removed;
+  }
+
+  /**
+   * What the run's child could not remove stays, but not as the run user's: root takes reports/
+   * and home/ (their parent is root's, so the run cannot have swapped them) and closes them to
+   * everyone else, so no later run can read what is left before the container is gone.
+   */
+  async function lockAway(runId, made) {
+    for (const dir of [made.outDir, made.home]) {
+      try {
+        const info = await lstat(dir);
+        if (!info.isDirectory() || info.isSymbolicLink()) continue;
+        await chown(dir, process.getuid(), process.getgid());
+        await chmod(dir, 0o700);
+      } catch (error) {
+        log.error(`run ${runId}: closing ${dir}: ${error.code ?? error.message}`);
+      }
     }
   }
 
@@ -309,15 +377,15 @@ export function createWorker({
         unsafe = true;
         log.error(`run ${run.id}: stopping its processes: ${error.message}`);
       }
+      if (!unsafe && workDir && !(await removeWorkDir(run.id, dirs, workDir))) unsafe = true;
       if (unsafe) {
-        // A process of the run's user is still alive. Reading or deleting its folder as root
-        // now could be steered (a folder swapped for a link mid-walk), so do neither. The run is
-        // already failed or requeued. End the server: with tini as PID 1 the whole container
-        // stops, which ends every process in it, and the host starts a fresh one.
-        log.error(`run ${run.id}: a process of the run's user would not stop; leaving ${workDir ?? "its folder"} alone and exiting`);
+        // A process of the run's user may still be alive, or the run left files that would stay
+        // as that user's for later runs. Reading or deleting them as root could be steered (a
+        // folder swapped for a link mid-walk), so do neither. The run is already failed or
+        // requeued. End the server: with tini as PID 1 the whole container stops, which ends
+        // every process in it and its /tmp, and the host starts a fresh one.
+        log.error(`run ${run.id}: the run's processes or files could not be cleared; leaving ${workDir ?? "its folder"} alone and exiting`);
         exit(1);
-      } else if (workDir) {
-        await removeWorkDir(run.id, dirs, workDir);
       }
     }
   }

@@ -37,3 +37,7 @@ Append-only journal, oldest first. Earlier history: `git log` and `docs/handoff.
 2026-11-24 [decision] Owner ("SR fix 1", via PManager): fix R2.F-1 by reading and deleting the run's files as the run's user, and a stop that is proven by a completed kill(-1) as that user.
 
 2026-11-24 [code] R2.F-1 to R2.F-3: report-child.js reads and clears as RUN_AS_UID over IPC, root only rmdirs; the stop returns only after a completed kill(-1) helper and an empty scan; pause timers cleared.
+
+2026-11-24 [code] R2.G-1, R2.G-3: the kill helper starts as root and drops to the user with no exec, so the user cannot trace it; the helper-limit test is deterministic.
+
+2026-11-24 [code] R2.G-2, R2.G-4, R2.G-5: a partial clear ends the server; the child's answers are checked, the whole read is bounded; tests fail if root reads or deletes.

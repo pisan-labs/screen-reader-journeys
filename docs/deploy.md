@@ -283,20 +283,27 @@ domain only you control, where you can.
     `server/report-child.js`):
     - **the server never reads or deletes the run's files as root.** A short child process that
       runs as the run's user lists and reads the reports, and sends them to the server over IPC.
-      Another empties `reports/` and `home/` at the end. Root then removes the two folders and
-      the work folder one at a time with `rmdir`, which never follows a link and fails on a
-      folder that is not empty (what is left stays, and is logged). Whatever a process of that
-      user might still do, reading and deleting reach only what that user may anyway;
+      The server checks each answer (its shape, and paths inside the folder), and the whole
+      read has a time limit. Another child empties `reports/` and `home/` at the end. Root then
+      removes the two folders and the work folder one at a time with `rmdir`, which never follows
+      a link and fails on a folder that is not empty. Whatever a process of that user might
+      still do, reading and deleting reach only what that user may anyway. The child first makes
+      the run's own folders writable again, so a folder the run made read-only does not stay.
+      **If anything is still left**, it would be in `/tmp` as that user's, for later runs to
+      read: root takes `reports/` and `home/` and closes them to everyone else (mode 0700), and
+      the server exits, as after a failed stop (below);
     - the run's work folder belongs to the server (mode 0755); only `reports/` and `home/` inside
       it are the run user's, so the run cannot rename or replace them. Before reading, the
       server checks that `reports/` is still the folder it made: not a link, the same inode, the
       same owner;
     - before each run, before its reports are read, and when it ends on any path, the server
       ends every process of that user. Each pass kills every listed pid from root, which they
-      cannot block, and then everything of that user at once: a helper running as that user
-      calls `kill(-1, SIGKILL)` once, which the kernel sends to every process of the user in
-      one pass, and which a process that forks to get away cannot outrun. Root ends the helper
-      after a second if it is stopped. The stop returns only after a pass whose helper ran to
+      cannot block, and then everything of that user at once: a helper calls
+      `kill(-1, SIGKILL)` once as that user, which the kernel sends to every process of the
+      user it can signal. The helper
+      starts as root and becomes the user inside itself, with no exec afterwards, so a process
+      of that user can never trace it and fake its result. Root ends the helper after a second
+      if it is stopped. The stop returns only after a pass whose helper ran to
       the end and a scan after it that finds no live thread of that user; one empty scan is
       never taken as proof;
     - **if that stop does not succeed** (within 10 seconds), the run fails or goes back in the

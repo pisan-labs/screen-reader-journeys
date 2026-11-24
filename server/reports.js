@@ -6,8 +6,8 @@
 // - the worker keeps the run's work folder root-owned, so the run cannot swap its reports folder
 //   for a link, and checkReportsFolder() checks that it is still the folder the worker made;
 // - stopUserProcesses() first ends every process of that user, and returns only once a kill(-1)
-//   as that user has run to the end and no process of the user is left, so nothing changes the
-//   folder while it is read and nothing survives into the next person's run;
+//   as that user has run to the end and a scan after it finds no live thread of the user; if it
+//   cannot confirm that, the worker reads and deletes nothing and the server exits;
 // - the reading and the deleting happen in a child that runs as that user (report-child.js,
 //   startReportChild()), so whatever a missed process does, they reach only what that user may;
 // - listReportFiles() lists the folder without following links, and keeps regular files only;
@@ -161,6 +161,18 @@ export async function processesOf(uid, procDir = "/proc") {
 const KILL_ALL = `try { process.kill(-1, "SIGKILL"); process.exit(0); } catch (e) { process.exit(e && e.code === "ESRCH" ? 0 : 2); }`;
 
 /**
+ * The helper starts as root and becomes the user only inside itself, with no exec afterwards. A
+ * process the user started could otherwise trace it while node starts (it would be the user's
+ * own, traceable program) and make it exit 0 without the kill. As root it cannot be traced by
+ * the user, and after setuid() the kernel marks it not dumpable, so it still cannot. A failure
+ * to change user exits 4 (no proof).
+ */
+const dropTo = (uid, gid) =>
+  `try { process.setgroups([]); process.setgid(${Number(gid)}); process.setuid(${Number(uid)}); } catch { process.exit(4); }
+if (process.getuid() !== ${Number(uid)} || process.geteuid() !== ${Number(uid)}) process.exit(4);
+`;
+
+/**
  * Kill every process of `uid`, from a short-lived helper that runs as that user (kill(-1) picks
  * them by user). Resolves to true only when the helper exited by itself with code 0, so its one
  * kill(-1) ran to the end; false otherwise.
@@ -171,12 +183,13 @@ const KILL_ALL = `try { process.kill(-1, "SIGKILL"); process.exit(0); } catch (e
  *
  * @param {number} uid
  * @param {number} gid
- * @param {{ limitMs?: number }} [options]
+ * @param {{ limitMs?: number, program?: string }} [options] `program`: what the helper runs once
+ *   it is the user (the tests give it one that never ends)
  * @returns {Promise<boolean>}
  */
-export function killAllOf(uid, gid, { limitMs = 1000 } = {}) {
+export function killAllOf(uid, gid, { limitMs = 1000, program = KILL_ALL } = {}) {
   return new Promise((resolve) => {
-    const helper = spawn(process.execPath, ["-e", KILL_ALL], { uid, gid, env: {}, cwd: "/", stdio: "ignore" });
+    const helper = spawn(process.execPath, ["-e", dropTo(uid, gid) + program], { env: {}, cwd: "/", stdio: "ignore", execArgv: [] });
     const timer = setTimeout(() => helper.kill("SIGKILL"), limitMs);
     const done = (code, signal) => {
       clearTimeout(timer);
@@ -246,6 +259,8 @@ const REPORT_CHILD = fileURLToPath(new URL("./report-child.js", import.meta.url)
  */
 export function startReportChild(asUser, { limitMs = 30000 } = {}) {
   const child = fork(REPORT_CHILD, [], {
+    // None of this process's node flags (an inspector, say) carried into the child.
+    execArgv: [],
     ...(asUser ? { uid: asUser.uid, gid: asUser.gid } : {}),
     env: {},
     cwd: "/",

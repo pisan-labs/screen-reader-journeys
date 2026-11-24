@@ -273,17 +273,14 @@ for (;;) {
     });
   }
 
-  it("ends the kill helper from root after its time limit when it is stopped (R2.F-2)", { skip: !root && "needs root, as in the Docker image" }, async () => {
-    const { child, exited } = await hunter("SIGSTOP");
-    try {
+  it("ends the kill helper from root after its time limit, stopped or running (R2.F-2, R2.G-3)", { skip: !root && "needs root, as in the Docker image" }, async () => {
+    // Deterministic: the helper itself never finishes, so only root's limit can end it.
+    for (const program of ['process.kill(process.pid, "SIGSTOP")', "setInterval(() => {}, 1000)"]) {
       const started = Date.now();
-      assert.equal(await killAllOf(10001, 10001, { limitMs: 300 }), false, "a stopped helper proves nothing");
+      assert.equal(await killAllOf(10001, 10001, { limitMs: 300, program }), false, `no proof from: ${program}`);
       assert.ok(Date.now() - started < 5000, "root ended it");
-    } finally {
-      await stopUserProcesses(10001);
     }
-    assert.equal(await exited, "SIGKILL");
-    assert.ok(!(await live(child.pid)));
+    assert.deepEqual(await processesOf(10001), []);
   });
 
   let cc = false;
@@ -339,6 +336,73 @@ int main(int argc, char **argv) {
     // The hopper's own clock decides survival: wait until its limit has passed.
     await until(async () => Date.now() > spawnedAt + LIMIT_S * 1000 + 500);
     assert.equal(await readFile(survived, "utf8").catch(() => "no"), "no", `the hopper outlived a stop that ${outcome}`);
+    assert.deepEqual(await processesOf(10001), []);
+  });
+
+  it("cannot be traced by a process of the run's user, so its proof cannot be faked (R2.G-1)", { skip: (!root && "needs root, as in the Docker image") || (!cc && "needs a C compiler") }, async () => {
+    // A process of the run's user that tries PTRACE_SEIZE on every other process of that user it
+    // sees, and writes down any success. The helper starts as root and becomes the user without
+    // an exec, so it is never traceable.
+    const source = join(base, "tracer.c");
+    const binary = join(base, "tracer");
+    const attached = join(base, "tracer-attached");
+    const watching = join(base, "tracer-watching");
+    await writeFile(
+      source,
+      `#define _GNU_SOURCE
+#include <dirent.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ptrace.h>
+#include <sys/wait.h>
+#include <unistd.h>
+int main(int argc, char **argv) {
+  pid_t me = getpid();
+  static char seen[4194304];
+  FILE *f = fopen(argv[2], "w");
+  if (f) { fputs("yes", f); fclose(f); }
+  for (;;) {
+    DIR *d = opendir("/proc");
+    if (!d) continue;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+      int pid = atoi(e->d_name);
+      if (pid <= 0 || pid == me || pid >= 4194304 || seen[pid]) continue;
+      char path[64], line[256];
+      snprintf(path, sizeof path, "/proc/%d/status", pid);
+      FILE *s = fopen(path, "r");
+      if (!s) continue;
+      int mine = 0;
+      while (fgets(line, sizeof line, s)) if (!strncmp(line, "Uid:", 4)) { mine = strstr(line, "10001") != NULL; break; }
+      fclose(s);
+      if (!mine) continue;
+      seen[pid] = 1;
+      if (ptrace(PTRACE_SEIZE, pid, 0, 0) == 0) {
+        FILE *g = fopen(argv[1], "a");
+        if (g) { fprintf(g, "attached %d\\n", pid); fclose(g); }
+        int st;
+        ptrace(PTRACE_INTERRUPT, pid, 0, 0);
+        waitpid(pid, &st, __WALL);
+        ptrace(PTRACE_DETACH, pid, 0, 0);
+      }
+    }
+    closedir(d);
+  }
+}
+`
+    );
+    execFileSync("cc", ["-O2", "-o", binary, source]);
+    execFileSync("chmod", ["a+rx", base, binary]);
+    execFileSync("chmod", ["a+w", base]);
+    const child = spawn(binary, [attached, watching], { uid: 10001, gid: 10001, detached: true, stdio: "ignore" });
+    const exited = new Promise((resolve) => child.on("exit", (code, sig) => resolve(sig)));
+    const { readFile } = await import("node:fs/promises");
+    await until(async () => (await readFile(watching, "utf8").catch(() => "")) === "yes");
+    // As if the tracer were also a fast hopper: root's kill by pid misses it, so the helper must face it.
+    await stopUserProcesses(10001, { kill: () => {} });
+    assert.equal(await exited, "SIGKILL", "the tracer was ended, by the helper");
+    assert.equal(await readFile(attached, "utf8").catch(() => ""), "", "no helper could be traced");
     assert.deepEqual(await processesOf(10001), []);
   });
 });
@@ -402,6 +466,24 @@ describe("the report child (reading and deleting as the run's user)", () => {
     assert.equal(await readFile(join(vault, "keep.txt"), "utf8"), "root's");
     await rm(folder, { recursive: true });
     await rm(vault, { recursive: true });
+  });
+
+  it("as the run's user, empties a folder the run made read-only (R2.G-2)", { skip: !root && "needs root, as in the Docker image" }, async () => {
+    const folder = await mkdtemp(join(tmpdir(), "srj-child-"));
+    execFileSync("chmod", ["0755", folder]);
+    await mkdir(join(folder, "reports", "ro", "deeper"), { recursive: true });
+    await writeFile(join(folder, "reports", "ro", "deeper", "x.md"), "x");
+    execFileSync("chown", ["-R", "10001:10001", join(folder, "reports")]);
+    execFileSync("chmod", ["0500", join(folder, "reports", "ro", "deeper"), join(folder, "reports", "ro")]);
+    const child = startReportChild({ uid: 10001, gid: 10001 });
+    try {
+      assert.deepEqual(await child.call({ op: "clear", dirs: [join(folder, "reports")] }), { left: [] });
+    } finally {
+      child.close();
+    }
+    const { readdir } = await import("node:fs/promises");
+    assert.deepEqual(await readdir(join(folder, "reports")), []);
+    await rm(folder, { recursive: true });
   });
 });
 

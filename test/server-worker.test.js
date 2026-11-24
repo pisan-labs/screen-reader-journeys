@@ -18,6 +18,7 @@ import { timeoutFetch } from "../server/timeout-fetch.js";
 import { parseAllowedHosts } from "../server/hosts.js";
 import { MAX_REPORT_BYTES, createWorker } from "../server/worker.js";
 import { workerDb } from "../server/worker-db.js";
+import { clearFolders, handle } from "../server/report-child.js";
 import { WORKER_TOKEN, fakeSupabase } from "./helpers/fake-supabase.js";
 import { serve } from "./server.js";
 
@@ -423,6 +424,103 @@ describe("worker, with a fake run process", () => {
     assert.equal(fake.report(run.id, "summary.md").body, "# Summary");
     assert.ok(!existsSync(workDir), "the work folder is gone");
     assert.deepEqual(exits, []);
+  });
+
+  describe("with RUN_AS_UID, the run's files go through the run user's child only (R2.G-4)", () => {
+    const own = () => ({ ...config, runAs: { uid: process.getuid(), gid: process.getgid() } });
+    /**
+     * A stand-in for startReportChild: answers like the real child (report-child.js handle), or
+     * as `answer` says, and records each request. close() fails what is still waiting.
+     */
+    const fakeChild = (requests, answer = handle) => () => {
+      const pending = new Set();
+      return {
+        call(request) {
+          requests.push(request);
+          return new Promise((resolve, reject) => {
+            const entry = { reject };
+            pending.add(entry);
+            Promise.resolve(answer(request)).then(
+              (value) => (pending.delete(entry), resolve(value)),
+              (error) => (pending.delete(entry), reject(error))
+            );
+          });
+        },
+        close() {
+          for (const { reject } of pending) reject(new Error("report child ended"));
+          pending.clear();
+        },
+      };
+    };
+    const withFolder = (write) => {
+      let workDir;
+      const execute = async (job) => {
+        workDir = join(job.outDir, "..");
+        await write?.(job.outDir);
+        return { outcome: "done", error: null, results: [summary(BASIC, "walker")], blocked: [] };
+      };
+      return { execute, workDir: () => workDir };
+    };
+
+    it("reads the reports from the child's answers, not from the folder", async () => {
+      const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+      const fake = fakeSupabase({ runs: [run] });
+      const requests = [];
+      const answer = (request) => {
+        if (request.op === "list") return { files: ["from-child.md"], others: [] };
+        if (request.op === "read") return { text: "via the child" };
+        return clearFolders(request.dirs);
+      };
+      const { execute, workDir } = withFolder((outDir) => writeFile(join(outDir, "summary.md"), "in the folder"));
+      const exits = [];
+      await createWorker({ db: dbOf(fake), catalog, config: own(), execute, lookup, log: quiet, stopProcesses: async () => {}, startChild: fakeChild(requests, answer), exit: (c) => exits.push(c) }).tick();
+      assert.deepEqual(fake.tables.run_reports.map((r) => [r.path, r.body]), [["from-child.md", "via the child"]], "root read nothing itself");
+      assert.deepEqual(requests.map((r) => r.op), ["list", "read", "clear"]);
+      assert.ok(!existsSync(workDir()), "emptied by the child, then removed folder by folder");
+      assert.deepEqual(exits, []);
+    });
+
+    it("never deletes the run's files as root: what the child leaves stays, and the server ends (R2.G-2)", async () => {
+      const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+      const fake = fakeSupabase({ runs: [run] });
+      const requests = [];
+      const answer = (request) => (request.op === "clear" ? { left: [join(request.dirs[0], "summary.md")] } : handle(request));
+      const { execute, workDir } = withFolder((outDir) => writeFile(join(outDir, "summary.md"), "# Summary"));
+      const exits = [];
+      try {
+        await createWorker({ db: dbOf(fake), catalog, config: own(), execute, lookup, log: quiet, stopProcesses: async () => {}, startChild: fakeChild(requests, answer), exit: (c) => exits.push([c, fake.run(run.id).status]) }).tick();
+        assert.equal(fake.run(run.id).status, "done");
+        assert.ok(existsSync(join(workDir(), "reports", "summary.md")), "root did not remove it");
+        const { statSync } = await import("node:fs");
+        for (const dir of ["reports", "home"]) {
+          const info = statSync(join(workDir(), dir));
+          assert.equal(info.mode & 0o777, 0o700, `${dir} is closed to everyone else`);
+          assert.equal(info.uid, process.getuid(), `${dir} is the server's now`);
+        }
+        assert.deepEqual(exits, [[1, "done"]]);
+      } finally {
+        if (workDir()) await rm(workDir(), { recursive: true, force: true });
+      }
+    });
+
+    it("fails the run on a malformed answer from the child (R2.G-5)", async () => {
+      const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+      const fake = fakeSupabase({ runs: [run] });
+      const answer = (request) => (request.op === "list" ? { files: ["../../etc/passwd.md"], others: [] } : handle(request));
+      const { execute } = withFolder();
+      await createWorker({ db: dbOf(fake), catalog, config: own(), execute, lookup, log: quiet, stopProcesses: async () => {}, startChild: fakeChild([], answer), exit: () => {} }).tick();
+      assert.equal(fake.run(run.id).status, "failed");
+      assert.equal(fake.tables.run_reports.length, 0);
+    });
+
+    it("bounds the whole read, not only each request (R2.G-5)", async () => {
+      const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+      const fake = fakeSupabase({ runs: [run] });
+      const answer = (request) => (request.op === "read" ? new Promise(() => {}) : handle(request));
+      const { execute } = withFolder((outDir) => writeFile(join(outDir, "summary.md"), "# Summary"));
+      await createWorker({ db: dbOf(fake), catalog, config: own(), execute, lookup, log: quiet, stopProcesses: async () => {}, startChild: fakeChild([], answer), readLimitMs: 100, exit: () => {} }).tick();
+      assert.equal(fake.run(run.id).status, "failed");
+    });
   });
 
   it("when only the stop before reading fails: reads and deletes nothing, and ends the server (R2.F-2)", async () => {
