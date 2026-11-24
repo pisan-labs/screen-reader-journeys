@@ -10,7 +10,7 @@ import { link, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises"
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, before, describe, it } from "node:test";
+import { after, before, describe, it, mock } from "node:test";
 import { fileURLToPath } from "node:url";
 import { loadCatalog, REPO_ROOT } from "../server/catalog.js";
 import { MAX_BLOCKED, MAX_MESSAGE, MAX_PROGRESS, STEP_EVERY_MS, childEnv, executeRun, probeSandbox } from "../server/execute.js";
@@ -790,6 +790,26 @@ describe("worker, with a fake run process", () => {
       assert.ok(lines.some((m) => m.includes("left out 2 more files (saving the reports took longer than 3 s)")), lines.join("\n"));
     });
 
+    it("by default measures that limit on a monotonic clock, so the wall clock jumping changes nothing (R5.2)", async () => {
+      const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+      const fake = fakeSupabase({ runs: [run] });
+      const db = dbOf(fake);
+      const wall = Date.now;
+      // After the first write, the wall clock jumps an hour ahead (or the host corrects it).
+      let ahead = 0;
+      mock.method(Date, "now", () => wall.call(Date) + ahead);
+      const jumpyDb = { ...db, saveReport: async (...args) => ((ahead = 3_600_000), db.saveReport(...args)) };
+      const { execute } = withFolder(files("a.md", "b.md", "c.md", "d.md"));
+      try {
+        await createWorker({ db: jumpyDb, catalog, config: own(), execute, lookup, log: quiet, stopProcesses: async () => {}, startChild: fakeChild([]), saveLimitMs: 3000, exit: () => {} }).tick();
+      } finally {
+        mock.restoreAll();
+      }
+      assert.equal(fake.run(run.id).status, "done");
+      assert.equal(fake.run(run.id).summary.skipped_files, undefined, "nothing left out");
+      assert.equal(fake.tables.run_reports.length, 4);
+    });
+
     it(`stops asking the database once ${MAX_REPORT_FILES} files are kept (R4.1)`, async () => {
       const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
       const fake = fakeSupabase({ runs: [run] });
@@ -829,11 +849,16 @@ describe("worker, with a fake run process", () => {
       const fake = fakeSupabase({ runs: [run] });
       const db = dbOf(fake);
       let calls = 0;
+      // The database's own words, from the migration, so the worker's match is checked against
+      // them and not against a copy (R5.2).
+      const migration = readFileSync(fileURLToPath(new URL("../supabase/migrations/0001_runs.sql", import.meta.url)), "utf8");
+      const [, capMessage, capCode] = /raise exception '(A run keeps at most \d+ report files\.)' using errcode = '(\d+)'/.exec(migration) ?? [];
+      assert.ok(capMessage, "the migration still has the cap on files");
       const cappedDb = {
         ...db,
         saveReport: async (...args) => {
           calls += 1;
-          if (calls === 2) throw Object.assign(new Error("worker_save_report: A run keeps at most 200 report files."), { code: "54000" });
+          if (calls === 2) throw Object.assign(new Error(`worker_save_report: ${capMessage}`), { code: capCode });
           return db.saveReport(...args);
         },
       };
@@ -916,9 +941,10 @@ describe("worker, with a fake run process", () => {
       it("ends the probe when the worker stops, without exiting as a failure (R8.2)", { timeout: 10000 }, async () => {
         let ended = false;
         const probe = ({ signal }) => new Promise((resolve) => signal.addEventListener("abort", () => ((ended = true), resolve("the probe ended (SIGKILL)"))));
-        const { exits, errors } = await start({ sandbox: true, probe });
+        const { exits, errors, stopped } = await start({ sandbox: true, probe });
         assert.equal(ended, true, "stop() ended the probe");
         assert.deepEqual(exits, [], errors.join("\n"));
+        assert.equal(stopped.length, 1, "and what it left was stopped (R9.7)");
       });
 
       it("refuses when what the probe left cannot be stopped", async () => {
@@ -1553,6 +1579,21 @@ describe("run-child.js sends the refusals left at the end (R9.3)", () => {
     assert.deepEqual(sent.filter((m) => m.type === "result").map((m) => m.result.mode), ["walker"], "made before the stop, so sent");
   });
 
+  it("starts the browser through the proxy, with the sandbox the job asks for, and no QUIC or WebRTC UDP (R9.7)", async () => {
+    const { runJob } = await import("../server/run-child.js");
+    for (const chromiumSandbox of [true, false]) {
+      const seen = [];
+      const job = { allowedTargetHosts: "", chromiumSandbox, journeys: [{ path: "a", file: "a" }], modes: ["walker"], outDir: "unused" };
+      await runJob(job, () => {}, {
+        startProxy: async () => stubProxy(),
+        load: async (file) => ({ file }),
+        write: async () => {},
+        run: async (_journey, { mode, launchOptions }) => (seen.push(launchOptions), resultOf(mode)),
+      });
+      assert.deepEqual(seen, [{ proxy: { server: "http://127.0.0.1:1" }, chromiumSandbox, args: ["--disable-quic", "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"] }]);
+    }
+  });
+
   it("sends the latest step at the end of the wait, and no step once the journey has returned (R19.1-7)", async () => {
     const { runJob } = await import("../server/run-child.js");
     const sent = [];
@@ -1600,7 +1641,7 @@ describe("run-child.js sends the refusals left at the end (R9.3)", () => {
   });
   const LIMIT = "all connections (byte limit: the run moved its 100 MB through the network guard)";
 
-  it("runs the job, then sends done (or the error) and exits 0 once that is written", async () => {
+  it("runs the job, then sends done (or the error) and exits 0 once that is written", { timeout: 10_000 }, async () => {
     const { runProcess } = await import("../server/run-child.js");
     for (const [run, last] of [
       [async (_job, send) => send({ type: "result" }), { type: "done" }],
@@ -1617,7 +1658,7 @@ describe("run-child.js sends the refusals left at the end (R9.3)", () => {
     }
   });
 
-  it("at a stop: no new work, what is left at once, what came since once the job has ended, then exit 143 after the end is written (R20.2-1, R20.2-2)", async () => {
+  it("at a stop: no new work, what is left at once, what came since once the job has ended, then exit 143 after the end is written (R20.2-1, R20.2-2)", { timeout: 10_000 }, async () => {
     const { runProcess } = await import("../server/run-child.js");
     const log = [];
     const proxy = { blocked: ["a.example:443 (private)"] };
@@ -1636,16 +1677,22 @@ describe("run-child.js sends the refusals left at the end (R9.3)", () => {
       runner.stop();
     });
     assert.equal(stopped(), true, "the job is told, so it starts nothing new");
-    assert.deepEqual(log, [{ type: "blocked", blocked: ["a.example:443 (private)"] }], "sent at once, and nothing ended before the job has");
+    assert.deepEqual(log, [{ type: "blocked", blocked: ["a.example:443 (private)"] }], "sent at once");
+    // A turn of the event loop: a stop that did not wait for the job would have ended by now.
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(log, [{ type: "blocked", blocked: ["a.example:443 (private)"] }], "nothing ended before the job has");
     endJob();
     await exited;
     assert.deepEqual(log.slice(1), [{ type: "blocked", blocked: [LIMIT] }, "written", "exit 143"], "the one made since, then the end, then the exit; no done");
   });
 
-  it("at a stop, when the job does not end: ends after graceMs, and a stop after the end writes nothing more", async () => {
+  it("at a stop, when the job does not end: ends after graceMs, and a stop after the end writes nothing more", { timeout: 10_000 }, async (t) => {
     const { runProcess } = await import("../server/run-child.js");
-    // The timers are unref'd, as the run process's own work keeps it alive; here, this does.
+    // The timers are unref'd, as the run process's own work keeps it alive; here, this does,
+    // until the test ends, however it ends.
     const alive = setInterval(() => {}, 1000);
+    t.after(() => clearInterval(alive));
     try {
       const log = [];
       const proxy = { blocked: [] };
@@ -1733,7 +1780,9 @@ describe("run-child.js sends the refusals left at the end (R9.3)", () => {
   });
 
   it("so does a run stopped by its timeout (R9.3)", async () => {
-    // The page and run() take about a second; 8 s leaves room, as for the HANG test.
+    // The run's timeout is what this tests, so it waits on the clock. `ready` came after about
+    // 1.4 s here, and about 3.1 s on a quarter of a CPU (#20's round-2 review): 8 s leaves a margin
+    // of about 2.6 times there. On a slower machine, `wasReady` fails it plainly; raise it then.
     const outcome = await stoppedRun(() => ({ timeoutMs: 8000 }));
     assert.equal(outcome.outcome, "timeout");
   });
@@ -1780,6 +1829,20 @@ describe("probeSandbox (R7.1)", () => {
     const hang = await program("setInterval(() => {}, 1000);\n");
     try {
       assert.equal(await probeSandbox(null, { program: hang.file, timeoutMs: 200 }), "the probe ended (SIGKILL)");
+    } finally {
+      await hang.done();
+    }
+  });
+
+  // The probe's own timer is a minute away: an abort that did nothing would take that long.
+  it("ends a probe when its signal aborts, before or during it (R9.7)", { timeout: 10_000 }, async () => {
+    const hang = await program("setInterval(() => {}, 1000);\n");
+    try {
+      const during = new AbortController();
+      const answer = probeSandbox(null, { program: hang.file, timeoutMs: 60_000, signal: during.signal });
+      during.abort();
+      assert.equal(await answer, "the probe ended (SIGKILL)");
+      assert.equal(await probeSandbox(null, { program: hang.file, timeoutMs: 60_000, signal: AbortSignal.abort() }), "the probe ended (SIGKILL)");
     } finally {
       await hang.done();
     }

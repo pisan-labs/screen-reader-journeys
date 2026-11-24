@@ -236,7 +236,9 @@ Then in the dashboard:
     under 85% of lines, branches or functions). Node counts only files that ran, so
     `test/server-index.test.js` starts `server/index.js` as a real process, and it is measured
     too. CI runs coverage as an ordinary user and then, as root, the root-only tests of
-    `test/server-reports.test.js` and `test/server-worker.test.js`, which coverage does not count;
+    `test/server-reports.test.js` and `test/server-worker.test.js`, which coverage does not count.
+    Run as root, `test/server-index.test.js` starts the server as `nobody`, and skips those tests,
+    saying why, when `nobody` cannot read the checkout (one under `/root`, say);
   - in `web/`, for the dashboard: `npm run lint`, `npm run typecheck`, `npm run coverage` (at
     least 85%, under jsdom with fakes) and `npm run build`.
 - **`npm run test:sql`** applies the migrations twice to a throwaway local PostgreSQL, on a stub of

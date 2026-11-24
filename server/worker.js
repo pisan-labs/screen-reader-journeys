@@ -47,12 +47,13 @@ const BLOCKED_CHARS = 300;
 /** At most this many files left out one by one get a log line each; the rest are counted. */
 const LOGGED_EACH = 30;
 
+/** The entry the network guard adds when the run reached its byte limit. */
+const isByteLimit = (entry) => typeof entry === "string" && entry.startsWith(BYTE_LIMIT_ENTRY);
+
 /**
  * `text` cut to `max` characters in the middle, so its end (a file's extension, a refusal's
  * reason) still shows.
  */
-const isByteLimit = (entry) => typeof entry === "string" && entry.startsWith(BYTE_LIMIT_ENTRY);
-
 const cut = (text, max) => {
   const whole = String(text);
   if (whole.length <= 2 * max) {
@@ -590,13 +591,16 @@ export function createWorker({
   async function sandboxProblem() {
     if (!config.chromiumSandbox) return `${NEEDS_SANDBOX}: set CHROMIUM_SANDBOX=true (docs/deploy.md, Security)`;
     const reason = await probeSandbox(config.runAs, { signal: probing.signal });
-    if (stopping) return null; // shutting down: not a reason to exit as a failure
-    // The probe ran as the run's user: nothing of it may be left for the first run.
+    // The probe ran as the run's user: nothing of it may be left for the first run, nor after a
+    // stop that ended it (its Chromium would live on until the container ends; R9.7).
+    let notStopped = null;
     try {
       if (config.runAs) await stopProcesses(config.runAs);
     } catch (error) {
-      return `the sandbox probe's processes did not stop (${short(error.message, 300)})`;
+      notStopped = error;
     }
+    if (stopping) return null; // shutting down: not a reason to exit as a failure
+    if (notStopped) return `the sandbox probe's processes did not stop (${short(notStopped.message, 300)})`;
     return reason ? `${NEEDS_SANDBOX}, which did not start here: ${short(reason, 300)}` : null;
   }
 
