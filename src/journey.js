@@ -116,6 +116,7 @@ class Session {
    * switches, Enter otherwise. With `expectDownload` (true, a string or a RegExp for the file
    * name), waits for the download and checks its name.
    */
+  /** @param {{ expectDownload?: boolean | string | RegExp }} [options] */
   async activate({ expectDownload } = {}) {
     const role = this.driver.lastFocus?.role;
     const key = ["checkbox", "radio", "switch"].includes(role) ? "Space" : "Enter";
@@ -136,7 +137,8 @@ class Session {
   /** Choose an option in the focused <select> by its label (as arrow keys would, without opening the list). */
   async selectOption(label) {
     try {
-      await this.page.locator(":focus").selectOption({ label }, { timeout: 2000 });
+      // The last match: a shadow host also matches :focus (see describeFocusPortable).
+      await this.page.locator(":focus").last().selectOption({ label }, { timeout: 2000 });
     } catch {
       this.expect(false, `Choose "${label}" in the focused list`, "no such option");
       throw new StopJourney(`No option "${label}"`);
@@ -200,6 +202,10 @@ class Session {
  * Run one journey in one mode. `baseUrl` is the site under test, e.g. a pull request's preview.
  * `launchOptions` go to Playwright's browser launch (the hosted server uses them for its network
  * guard proxy).
+ */
+/**
+ * @param {any} journey
+ * @param {{ mode: string, baseUrl: string, headed?: boolean, launchOptions?: { args?: string[], [key: string]: any } }} options
  */
 export async function runJourney(journey, { mode, baseUrl, headed = false, launchOptions = {} }) {
   const Driver = DRIVERS[mode];

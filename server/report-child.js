@@ -64,7 +64,7 @@ export async function handle(request) {
 }
 
 if (process.send && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  process.on("message", async (message) => {
+  process.on("message", async (/** @type {any} */ message) => {
     const { id, request } = message ?? {};
     try {
       process.send({ id, ok: true, value: await handle(request) });

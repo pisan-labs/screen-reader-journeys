@@ -19,6 +19,8 @@ const strip = (headers) => Object.fromEntries(Object.entries(headers).filter(([n
 /**
  * Start the proxy on 127.0.0.1. Returns `{ server: "http://127.0.0.1:<port>", blocked, close() }`,
  * where `blocked` lists the refused connections as "host:port (reason)".
+ *
+ * @param {{ rules?: any[], lookup?: (host: string) => Promise<string[]>, idleMs?: number }} [options]
  */
 export async function startEgressProxy({ rules, lookup, idleMs = 60000 } = {}) {
   // Distinct refusals only, and at most MAX_BLOCKED of them: a page can make requests in a loop.
@@ -94,7 +96,7 @@ export async function startEgressProxy({ rules, lookup, idleMs = 60000 } = {}) {
       client.pipe(upstream);
     });
     upstream.setTimeout(idleMs, () => upstream.destroy());
-    client.setTimeout(idleMs, () => client.destroy());
+    /** @type {import("node:net").Socket} */ (client).setTimeout(idleMs, () => client.destroy());
     upstream.on("error", () => client.destroy());
     client.on("close", () => upstream.destroy());
   });
@@ -102,9 +104,9 @@ export async function startEgressProxy({ rules, lookup, idleMs = 60000 } = {}) {
   // A WebSocket upgrade sent without CONNECT is not tunnelled: refuse it rather than pass it on unchecked.
   server.on("upgrade", (req, socket) => socket.end("HTTP/1.1 403 Forbidden\r\n\r\n"));
 
-  await new Promise((done) => server.listen(0, "127.0.0.1", done));
+  await new Promise((done) => server.listen(0, "127.0.0.1", () => done(undefined)));
   return {
-    server: `http://127.0.0.1:${server.address().port}`,
+    server: `http://127.0.0.1:${/** @type {import("node:net").AddressInfo} */ (server.address()).port}`,
     blocked,
     close: () =>
       new Promise((done) => {

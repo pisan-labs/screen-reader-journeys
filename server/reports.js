@@ -189,7 +189,7 @@ if (process.getuid() !== ${Number(uid)} || process.geteuid() !== ${Number(uid)})
  */
 export function killAllOf(uid, gid, { limitMs = 1000, program = KILL_ALL } = {}) {
   return new Promise((resolve) => {
-    const helper = spawn(process.execPath, ["-e", dropTo(uid, gid) + program], { env: {}, cwd: "/", stdio: "ignore", execArgv: [] });
+    const helper = spawn(process.execPath, ["-e", dropTo(uid, gid) + program], { env: {}, cwd: "/", stdio: "ignore" });
     const timer = setTimeout(() => helper.kill("SIGKILL"), limitMs);
     const done = (code, signal) => {
       clearTimeout(timer);

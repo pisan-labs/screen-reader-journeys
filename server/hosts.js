@@ -84,6 +84,7 @@ export function checkTargetUrl(input, rules) {
   const refuse = (reason) => ({ ok: false, reason });
   if (typeof input !== "string" || input === "") return refuse("Enter the address of the site to test.");
   if (input.length > 2048) return refuse("The address is too long.");
+  // eslint-disable-next-line no-control-regex -- refusing control characters is the point
   if (/[\s\u0000-\u001f\u007f\\]/.test(input)) return refuse("The address contains spaces, control characters or backslashes.");
   let url;
   try {
@@ -108,15 +109,15 @@ export function checkTargetUrl(input, rules) {
 // IPv6 addresses, ::ffff:a.b.c.d, against the IPv4 ranges itself; ::/96 covers ::, ::1 and the
 // IPv4-compatible ::a.b.c.d, and ::ffff:0:0:0/96 the IPv4-translated ::ffff:0:a.b.c.d.)
 const PRIVATE = new BlockList();
-for (const [net, prefix] of [
+for (const [net, prefix] of /** @type {[string, number][]} */ ([
   ["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8], ["169.254.0.0", 16],
   ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.0.2.0", 24], ["192.88.99.0", 24], ["192.168.0.0", 16],
   ["198.18.0.0", 15], ["198.51.100.0", 24], ["203.0.113.0", 24], ["224.0.0.0", 4], ["240.0.0.0", 4],
-]) PRIVATE.addSubnet(net, prefix, "ipv4");
-for (const [net, prefix] of [
+])) PRIVATE.addSubnet(net, prefix, "ipv4");
+for (const [net, prefix] of /** @type {[string, number][]} */ ([
   ["::", 96], ["::ffff:0:0:0", 96], ["64:ff9b::", 96], ["64:ff9b:1::", 48], ["100::", 64], ["2001::", 32],
   ["2001:db8::", 32], ["2002::", 16], ["fc00::", 7], ["fe80::", 10], ["fec0::", 10], ["ff00::", 8],
-]) PRIVATE.addSubnet(net, prefix, "ipv6");
+])) PRIVATE.addSubnet(net, prefix, "ipv6");
 
 /** True for an address the server must not visit on a user's behalf (or for anything that is not an IP address). */
 export function isPrivateAddress(address) {

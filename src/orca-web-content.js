@@ -6,7 +6,8 @@
 import { execFileSync } from "node:child_process";
 import guidepup from "@guidepup/guidepup";
 
-const { orcaKeyCodeCommands: commands } = guidepup;
+// Typed loosely: the command names differ between Guidepup releases, as the lines below allow for.
+const { orcaKeyCodeCommands: commands } = /** @type {any} */ (guidepup);
 // Guidepup 0.40 groups Orca's commands by service; older releases had them at the top level.
 const PRESENT_TITLE = commands.WhereAmIPresenter?.PresentTitle ?? commands.PresentTitle;
 const START_OF_FILE = commands.CaretNavigator?.StartOfFile ?? commands.StartOfFile;

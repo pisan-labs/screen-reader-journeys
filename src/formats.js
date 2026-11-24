@@ -147,6 +147,7 @@ ${hasComparison(results) ? '<p><a href="compare.html">Compare the modes side by 
 const escapeXml = (value) =>
   String(value ?? "")
     // Characters XML 1.0 does not allow at all.
+    // eslint-disable-next-line no-control-regex -- the allowed control characters are the point
     .replace(/[^\x09\x0A\x0D\x20-퟿-�]/gu, "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")

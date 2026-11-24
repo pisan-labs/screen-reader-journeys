@@ -44,7 +44,9 @@ export async function describeFocusPortable(page) {
   let role = dom.tag;
   let name = "";
   try {
-    const snapshot = await page.locator(":focus").first().ariaSnapshot({ timeout: 1000 });
+    // A shadow host also matches :focus while focus is inside its tree, and comes first in
+    // document order: the focused element itself is the last match.
+    const snapshot = await page.locator(":focus").last().ariaSnapshot({ timeout: 1000 });
     const match = snapshot.match(/^- ([\w-]+)(?: "((?:[^"\\]|\\.)*)")?/);
     if (match) {
       role = match[1];

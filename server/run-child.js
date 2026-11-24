@@ -30,6 +30,11 @@ export function summarizeResult(result, path) {
  * job: { baseUrl, journeys: [{ path, file }], modes, outDir, allowedTargetHosts, chromiumSandbox }
  * send(message): receives { type: "result", result, blocked } after each journey and mode.
  */
+/**
+ * @param {any} job
+ * @param {(message: object) => void} send
+ * @param {{ lookup?: (host: string) => Promise<string[]> }} [options]
+ */
 export async function runJob(job, send, { lookup } = {}) {
   const proxy = await startEgressProxy({ rules: parseAllowedHosts(job.allowedTargetHosts), lookup });
   const launchOptions = {

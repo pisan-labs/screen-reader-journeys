@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8" /><title>Shadow select</title></head>
+  <body>
+    <main><h1>Shadow select</h1>
+      <pick-size><template shadowrootmode="open"><label>Size <select><option>Small</option><option>Large</option></select></label><p role="status"></p></template></pick-size>
+    </main>
+    <script>
+      const root = document.querySelector("pick-size").shadowRoot;
+      root.querySelector("select").addEventListener("change", (e) => (root.querySelector("p").textContent = `Chose ${e.target.value}`));
+    </script>
+  </body>
+</html>

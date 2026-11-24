@@ -24,6 +24,11 @@ export function childEnv(env = process.env, overrides = {}) {
  * the browser cannot read this server's environment (its Supabase keys) through /proc. This
  * server must then run as root, as it does in the Docker image.
  */
+/**
+ * @param {object} job
+ * @param {{ timeoutMs?: number, signal?: AbortSignal, killAfterMs?: number, runAs?: { uid: number, gid: number, home?: string } | null }} [options]
+ * @returns {Promise<{ outcome: string, error: string | null, results: any[], blocked: string[] }>}
+ */
 export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs = null } = {}) {
   return new Promise((resolve) => {
     const results = [];
@@ -56,7 +61,7 @@ export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs =
       resolve({ outcome, error, results, blocked });
     };
 
-    child.on("message", (message) => {
+    child.on("message", (/** @type {any} */ message) => {
       if (message?.type === "result") {
         results.push(message.result);
         blocked.push(...(message.blocked ?? []));
