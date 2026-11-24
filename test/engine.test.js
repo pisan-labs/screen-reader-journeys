@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { loadJourney, runJourney } from "../src/journey.js";
-import { renderJourney } from "../src/report.js";
+import { renderJourney, renderSummary } from "../src/report.js";
 import { serve } from "./server.js";
 
 const fixtures = fileURLToPath(new URL("./fixtures/", import.meta.url));
@@ -95,6 +95,7 @@ describe("opening the page", () => {
   let server;
   let base;
   let held = null;
+  const still = (s) => `the network was still busy ${s} s after the page loaded: the page may still have been loading, and the walk may be incomplete`;
   before(async () => {
     const { createServer } = await import("node:http");
     const late = '<!doctype html><title>Late</title><h1>Late</h1><a href="#one">One</a><div id="more"></div><script>fetch("/api" + location.search).then((r) => r.text()).then((t) => (document.getElementById("more").innerHTML = t))</script>';
@@ -129,7 +130,8 @@ describe("opening the page", () => {
     const result = await runJourney(journey, { mode: "walker", baseUrl: base, idleWaitMs: 1000 });
     assert.equal(result.status, "pass", result.error);
     assert.ok(result.steps.length >= 2, "it walked the page");
-    assert.equal(result.steps[0].action, "note: the network was still busy 1 s after the page loaded, so the page may not have finished loading", "and says the page may not have finished (R22.1-1)");
+    assert.equal(result.steps[0].action, `note: ${still(1)}`, "and says the page may not have finished (R22.1-1)");
+    assert.equal(result.stillLoading, still(1));
   });
 
   it("waits for content that comes after load, while the network is busy (R22.1-1)", async () => {
@@ -139,12 +141,25 @@ describe("opening the page", () => {
     const tabs = result.steps.filter((s) => s.action === "Tab").map((s) => s.focus?.name);
     assert.deepEqual(tabs.slice(0, 5), ["One", "Two", "Three", "Four", "Five"], "the links that came later were walked too");
     assert.ok(!result.steps.some((s) => /network was still busy/.test(s.action)));
+    assert.equal(result.stillLoading, undefined);
+  });
+
+  it("waits out content that comes 8 s after load, with the default wait (R22.1-1)", async () => {
+    const journey = { name: "Late", start: "/late.html?ms=8000", run: (sr) => sr.walkTabOrder() };
+    const result = await runJourney(journey, { mode: "walker", baseUrl: base });
+    const tabs = result.steps.filter((s) => s.action === "Tab").map((s) => s.focus?.name);
+    assert.deepEqual(tabs.slice(0, 5), ["One", "Two", "Three", "Four", "Five"]);
+    assert.equal(result.stillLoading, undefined);
   });
 
   it("says so when the content may still have been coming at the end of the wait (R22.1-1)", async () => {
     const journey = { name: "Late", start: "/late.html?ms=3000", run: (sr) => sr.walkTabOrder() };
     const result = await runJourney(journey, { mode: "walker", baseUrl: base, idleWaitMs: 300 });
-    assert.equal(result.steps[0].action, "note: the network was still busy 0.3 s after the page loaded, so the page may not have finished loading");
+    assert.equal(result.steps[0].action, `note: ${still(0.3)}`);
+    // The journey's report and summary.md say it at the top, not only in the transcript.
+    assert.ok(renderJourney(result).includes(`- **Note:** ${still(0.3)}.`), renderJourney(result).slice(0, 600));
+    const summary = renderSummary([result]);
+    assert.ok(summary.includes(`- Late, walker: ${still(0.3)}.`), summary);
   });
 
   it("fails where the page closes during the wait for quiet, not later (R22.1-3)", async () => {

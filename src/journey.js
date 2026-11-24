@@ -290,7 +290,11 @@ export async function runJourney(journey, { mode, baseUrl, headed = false, launc
         throw error;
       }
     );
-    if (!quiet) session.note(`the network was still busy ${+(idleWaitMs / 1000).toFixed(1)} s after the page loaded, so the page may not have finished loading`);
+    if (!quiet) {
+      // Kept on the result too, so the journey's report and summary.md say it at the top.
+      result.stillLoading = `the network was still busy ${+(idleWaitMs / 1000).toFixed(1)} s after the page loaded: the page may still have been loading, and the walk may be incomplete`;
+      session.note(result.stillLoading);
+    }
     if (journey.ready) await page.locator(journey.ready).first().waitFor({ timeout: 20000 });
     await settle(page, 300);
     driver.page = page;

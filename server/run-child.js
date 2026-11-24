@@ -40,17 +40,30 @@ export function sendLeftover(proxy, send) {
   if (left.length) send({ type: "blocked", blocked: left });
 }
 
+/** A journey whose page did not load in time (src/journey.js, LOAD_TIMEOUT_MS). */
+const LOAD_TIMED_OUT = /^page\.goto: Timeout \d+ms exceeded/;
+
+/** The result of a journey and mode that was not run, and why. */
+export function notRun(journey, path, mode, why) {
+  return { journey: path, name: journey.name, mode, status: "error", error: why, checks_total: 0, checks_passed: 0, errors: 0, warnings: 0, report_base: `${slug(journey.name)}.${mode}` };
+}
+
 /**
  * job: { baseUrl, journeys: [{ path, file }], modes, outDir, allowedTargetHosts, chromiumSandbox }
  * send(message): receives { type: "result", result, blocked } after each journey and mode, and
  * { type: "blocked", blocked } with any refusals left at the end.
  *
+ * Every journey of a run opens the same site. Once one's page has not loaded in time, the rest are
+ * not run, so a site that never loads does not hold the one worker for the whole run timeout:
+ * each gets a result that says why (R22.1-2).
+ *
  * @param {any} job
  * @param {(message: object) => void} send
- * @param {{ lookup?: (host: string) => Promise<string[]>, startProxy?: typeof startEgressProxy, onProxy?: (proxy: any) => void }} [options]
- *   `startProxy` (the tests' own), `onProxy` (told of the proxy, so a stop can send what is left)
+ * @param {{ lookup?: (host: string) => Promise<string[]>, startProxy?: typeof startEgressProxy, onProxy?: (proxy: any) => void, run?: typeof runJourney }} [options]
+ *   `startProxy` and `run` (the tests' own), `onProxy` (told of the proxy, so a stop can send
+ *   what is left)
  */
-export async function runJob(job, send, { lookup, startProxy = startEgressProxy, onProxy = () => {} } = {}) {
+export async function runJob(job, send, { lookup, startProxy = startEgressProxy, onProxy = () => {}, run = runJourney } = {}) {
   const rules = parseAllowedHosts(job.allowedTargetHosts);
   // As in the worker: with "*" or a wildcard, never a browser without its sandbox.
   if (needsSandbox(rules) && !job.chromiumSandbox) throw new Error('ALLOWED_TARGET_HOSTS with "*" or a wildcard rule needs Chromium\'s sandbox');
@@ -63,10 +76,15 @@ export async function runJob(job, send, { lookup, startProxy = startEgressProxy,
     args: ["--disable-quic", "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"],
   };
   const results = [];
+  let unreachable = null;
   try {
     for (const { path, file } of job.journeys) {
       const journey = await loadJourney(file);
       for (const mode of job.modes) {
+        if (unreachable) {
+          send({ type: "result", result: notRun(journey, path, mode, unreachable), blocked: proxy.blocked.splice(0) });
+          continue;
+        }
         // Progress for the run's page: this journey and mode, then its steps, at most one a second.
         send({ type: "progress", journey: path, mode });
         let told = 0;
@@ -75,7 +93,8 @@ export async function runJob(job, send, { lookup, startProxy = startEgressProxy,
           told = Date.now();
           send({ type: "progress", journey: path, mode, step: String(step.action).slice(0, 200), n: step.n });
         };
-        const result = await runJourney(journey, { mode, baseUrl: job.baseUrl, launchOptions, onStep });
+        const result = await run(journey, { mode, baseUrl: job.baseUrl, launchOptions, onStep });
+        if (LOAD_TIMED_OUT.test(result.error ?? "")) unreachable = `Not run: the site did not load in an earlier journey (${result.error})`;
         results.push(result);
         await writeReports(results, job.outDir);
         send({ type: "result", result: summarizeResult(result, path), blocked: proxy.blocked.splice(0) });

@@ -1396,6 +1396,39 @@ describe("run-child.js, with \"*\" or a wildcard (R8.2)", () => {
   });
 });
 
+describe("run-child.js, when the site does not load (R22.1-2)", () => {
+  const job = (outDir) => ({ allowedTargetHosts: "", journeys: [{ path: BASIC, file: join(fixtures, "basic.journey.js") }, { path: HANG, file: join(fixtures, "hang.journey.js") }], modes: ["walker", "virtual"], outDir });
+  const stubProxy = () => ({ server: "http://127.0.0.1:1", blocked: [], close: async () => {} });
+  const resultOf = (journey, mode, error) => ({ journey: journey.name, description: "", mode, modeLabel: mode, url: "http://127.0.0.1:1/", startedAt: new Date().toISOString(), status: error ? "error" : "pass", error, steps: [], expectations: [], findings: [], pageErrors: [], toolErrors: [] });
+  const runWith = async (error) => {
+    const { runJob } = await import("../server/run-child.js");
+    const out = await mkdtemp(join(tmpdir(), "srj-unloaded-"));
+    const runs = [];
+    const sent = [];
+    try {
+      await runJob(job(out), (m) => sent.push(m), {
+        startProxy: async () => stubProxy(),
+        run: async (journey, { mode }) => (runs.push(`${journey.name} ${mode}`), resultOf(journey, mode, runs.length === 1 ? error : null)),
+      });
+    } finally {
+      await rm(out, { recursive: true, force: true });
+    }
+    return { runs, results: sent.filter((m) => m.type === "result").map((m) => m.result) };
+  };
+
+  it("runs no more journeys once one's page did not load, and says why for each", async () => {
+    const { runs, results } = await runWith("page.goto: Timeout 120000ms exceeded.");
+    assert.deepEqual(runs, ["Basic test page walker"], "no more browsers opened");
+    assert.deepEqual(results.map((r) => [r.journey, r.mode, r.status]), [[BASIC, "walker", "error"], [BASIC, "virtual", "error"], [HANG, "walker", "error"], [HANG, "virtual", "error"]], "a result for every journey and mode");
+    for (const r of results.slice(1)) assert.equal(r.error, "Not run: the site did not load in an earlier journey (page.goto: Timeout 120000ms exceeded.)");
+  });
+
+  it("goes on after any other error", async () => {
+    const { runs } = await runWith("locator.waitFor: Timeout 20000ms exceeded.");
+    assert.equal(runs.length, 4);
+  });
+});
+
 describe("run-child.js sends the refusals left at the end (R9.3)", () => {
   it("sends what the proxy refused after the last result, the byte limit tripping as it closes included", async () => {
     const { runJob } = await import("../server/run-child.js");

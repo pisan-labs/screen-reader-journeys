@@ -25,6 +25,7 @@ export function renderJourney(result) {
     "",
     result.description ? `${result.description}\n` : "",
     `- **Result:** ${ICON[result.status]}${result.error ? ` (${result.error})` : ""}`,
+    ...(result.stillLoading ? [`- **Note:** ${result.stillLoading}.`] : []),
     `- **Mode:** ${result.modeLabel}${result.browser ? `, ${result.browser}` : ""}`,
     `- **Page:** ${result.url}`,
     `- **Checks:** ${result.expectations.length - failed} of ${result.expectations.length} passed`,
@@ -89,6 +90,9 @@ export function renderSummary(results) {
     "|---|---|---|---|---|---|---|",
     ...rows,
     "",
+    ...(results.some((r) => r.stillLoading)
+      ? ["Notes:", "", ...results.filter((r) => r.stillLoading).map((r) => `- ${cell(r.journey)}, ${r.mode}: ${r.stillLoading}.`), ""]
+      : []),
     hasComparison(results) ? "The same journeys side by side, step by step: [compare.md](compare.md).\n" : "",
     "Findings are automatic and can be wrong; the transcripts are for a person to read. None of",
     "this replaces testing with a real screen reader and with people who use one.",
