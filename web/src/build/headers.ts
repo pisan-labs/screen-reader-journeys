@@ -29,6 +29,50 @@ export function checkUrl(name: string, raw: string | undefined, required: boolea
   return value;
 }
 
+/**
+ * VITE_SITE_URL, the dashboard's one address (src/canonical.ts), as an origin, or '' when unset.
+ * Where it is required (Netlify's production builds) it must be https on hintwise.org, the only
+ * place sign-in can return to (R18.1-1); elsewhere it may also be a loopback http address, for
+ * the tests. A value with a path, query or credentials is refused, not trimmed.
+ */
+export function checkSiteUrl(name: string, raw: string | undefined, required: boolean): string {
+  const value = (raw ?? '').trim();
+  if (!value) {
+    if (required) throw new Error(`${name} is not set. It belongs in netlify.toml, under [context.production.environment].`);
+    return '';
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`${name} is not a URL: ${value}`);
+  }
+  const local = ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname);
+  if (parsed.protocol !== 'https:' && !(local && !required)) throw new Error(`${name} must start with https://`);
+  if (required && parsed.hostname !== 'hintwise.org' && !parsed.hostname.endsWith('.hintwise.org')) {
+    throw new Error(`${name} must be an address on hintwise.org, where sign-in can return: ${value}`);
+  }
+  if (parsed.pathname !== '/' || parsed.search || parsed.hash || parsed.username || parsed.password) throw new Error(`${name} must be an origin, with nothing after it: ${value}`);
+  return parsed.origin;
+}
+
+/**
+ * dist/site.js, which index.html loads first (the build adds it): a page opened anywhere but
+ * `origin` moves there before anything else runs. It also tells the analytics script that it
+ * has already run (hw-events.js returns when window.hintwise.track exists), so the visit counts
+ * once, at the one address (R18.1-6). src/main.ts moves the page too, if this did not.
+ */
+export function siteScript(origin: string): string {
+  return `// Written by the build (web/src/build/headers.ts, siteScript): the dashboard's one address.
+(function () {
+  var origin = ${JSON.stringify(origin)};
+  if (location.origin === origin) return;
+  window.hintwise = { track: function () {} };
+  location.replace(origin + location.pathname + location.search + location.hash);
+})();
+`;
+}
+
 /** The anon key, refusing a service-role or secret key. */
 export function checkPublicKey(name: string, raw: string | undefined, required: boolean): string {
   const key = (raw ?? '').trim();

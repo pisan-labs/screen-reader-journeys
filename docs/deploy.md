@@ -176,13 +176,20 @@ turned off, because every build costs credits. Docs-only commits carry `[skip ne
 | `VITE_SUPABASE_URL` | `https://auth.hintwise.org` | `netlify.toml` |
 | `VITE_SUPABASE_ANON_KEY` | the public anon key. The build refuses a service-role key | `netlify.toml` |
 | `VITE_API_URL` | the Render service's address, without a trailing slash | the site's environment variables |
-| `VITE_SITE_URL` | `https://screen-reader-journeys.hintwise.org`, the dashboard's one address | `netlify.toml` |
+| `VITE_SITE_URL` | `https://screen-reader-journeys.hintwise.org`, the dashboard's one address; production builds only | `netlify.toml`, `[context.production.environment]` |
 
-- **One address.** Opened anywhere else (over http, under the netlify.app name, at a deploy's own
-  address or a Deploy Preview), the page first moves to `VITE_SITE_URL`, keeping its path, query
-  and hash, and sign-in always returns there (`web/src/canonical.ts`). Otherwise Supabase would
-  refuse the return address and fall back to the shared project's `site_url`, another app. Without
-  `VITE_SITE_URL` (local work) the page stays where it is.
+- **One address.** Opened anywhere else (over http, under the netlify.app name, or at a deploy's
+  own address), the page first moves to `VITE_SITE_URL`, keeping its path, query and hash, and
+  sign-in always returns there (`web/src/canonical.ts`). Otherwise Supabase would refuse the return
+  address and fall back to the shared project's `site_url`, another app. The move is made by
+  `dist/site.js`, which the build writes and puts first in the page, before the analytics script,
+  so a moved visit counts once; `src/main.ts` moves the page too if `site.js` did not run.
+  - A production build without it, or with anything but an https address on `hintwise.org`,
+    fails.
+  - A Deploy Preview or branch deploy (both off) is built without it, so it shows its own code
+    where it is; sign-in cannot return to such an address in any case.
+  - Leave it empty for local work (`.env.example`), or a local page would move to the live site.
+    The dashboard test sets it empty, whatever the shell says.
 
 - **The build:** `tsc` and `vite build`.
 - **The Content-Security-Policy** goes in `_headers`. It allows exactly the Supabase URL and the
@@ -309,7 +316,9 @@ where you can.
   names no journey ("starting"), and while the reports are saved it says so, keeping the results.
   The time is the server's own (`elapsed_s`), so the visitor's clock does not matter. Nothing is
   stored: a server that is not running the run answers `{ "progress": null }`. The page's status
-  line says the journey and the results when they change, not the step or the clock.
+  line says the journey and the results when they change, not the step or the clock; opening
+  the page of a running run says them at once. When a run starts and there is no progress to
+  say yet (or the request fails), it says "The run is running." instead.
 
 - **Updates.**
   - Netlify builds on every push to `main`. Render deploys as its service is set up.

@@ -6,6 +6,8 @@
 
 import { randomUUID } from "node:crypto";
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 class Query {
   constructor(fake, table, user) {
     Object.assign(this, { fake, table, user, op: "select", values: null, filters: [], shape: "many", embed: false });
@@ -25,7 +27,8 @@ class Query {
     return this;
   }
   eq(column, value) {
-    this.filters.push((row) => row[column] === value);
+    // As in PostgreSQL, a uuid matches whatever the case of its letters.
+    this.filters.push((row) => row[column] === value || (UUID.test(String(row[column])) && UUID.test(String(value)) && String(row[column]).toLowerCase() === String(value).toLowerCase()));
     return this;
   }
   lt(column, value) {

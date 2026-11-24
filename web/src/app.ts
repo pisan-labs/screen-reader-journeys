@@ -41,6 +41,8 @@ export interface Catalog {
 }
 /** Where a run in progress is (GET /runs/:id/progress), while the server runs it. */
 export interface Progress {
+  /** "saving" once the journeys have ended and the reports are saved. */
+  phase?: 'running' | 'saving';
   journey: string | null;
   mode: string | null;
   step: string | null;
@@ -52,6 +54,8 @@ export interface Progress {
   failed: number;
   errored: number;
   started_at: string;
+  /** Seconds since the run started, by the server's clock. */
+  elapsed_s?: number;
   time_limit_s: number;
 }
 
@@ -72,6 +76,8 @@ export interface RunSummary {
   /** How many files were not kept in all; skipped_files names at most 20 of them. */
   skipped_count?: number;
   blocked_requests?: string[];
+  /** How many refused requests there were, when blocked_requests shows fewer. */
+  blocked_count?: number;
 }
 export interface RunResult {
   journey: string;
@@ -561,6 +567,7 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
     const skipped = run.summary?.skipped_files ?? [];
     const unnamed = Math.max(0, (run.summary?.skipped_count ?? skipped.length) - skipped.length);
     const blocked = run.summary?.blocked_requests ?? [];
+    const moreBlocked = Math.max(0, (run.summary?.blocked_count ?? blocked.length) - blocked.length);
     const download = (path: string, text: Child) =>
       available.has(path) ? h('button', { type: 'button', class: 'link-button', onclick: () => void downloadReport(run.id, path) }, text) : null;
     const waiting = run.status === 'queued' || run.status === 'running';
@@ -619,6 +626,7 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
             h('h2', {}, 'Blocked requests'),
             h('p', {}, "The server's network guard stopped the page from reaching these addresses. A journey that needs one may have failed because of it."),
             h('ul', {}, blocked.map((b) => h('li', { class: 'url' }, b))),
+            moreBlocked ? h('p', {}, `And ${moreBlocked} more.`) : null,
           ]
         : null,
       waiting ? null : [h('h2', {}, 'Delete'), h('p', {}, deleteButton(run))],
@@ -637,9 +645,10 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
    */
   function progressLines(p: Progress, list: Catalog | null, now: number) {
     const which = p.journey && p.mode ? `${journeyName(list, p.journey)}, ${MODES[p.mode]?.[0] ?? p.mode}` : 'starting';
-    const elapsed = (now - Date.parse(p.started_at)) / 1000;
+    // The server's own count, so this browser's clock does not matter (R19.1-6).
+    const elapsed = typeof p.elapsed_s === 'number' ? p.elapsed_s : (now - Date.parse(p.started_at)) / 1000;
     return {
-      running: `Running ${p.index} of ${p.of}: ${which}.`,
+      running: p.phase === 'saving' ? `Saving the reports: ${p.done} of ${p.of} journey runs finished.` : `Running ${p.index} of ${p.of}: ${which}.`,
       soFar: p.done ? `So far: ${p.passed} passed, ${p.failed} failed, ${plural(p.errored, 'error')}.` : null,
       step: p.step ? `Step ${p.n ?? ''}: ${p.step}`.replace('Step : ', 'Step: ') : null,
       clock: Number.isFinite(elapsed) ? `${duration(elapsed)} of ${duration(p.time_limit_s)}.` : null,
@@ -656,30 +665,36 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
     let shown: string | null = null;
     let saidProgress: string | null = null;
 
-    /** Show, and say when it changes, where the run is; nothing once it is no longer running. */
-    async function showProgress(run: Run) {
+    /**
+     * Show, and say when it changes, where the run is; nothing once it is no longer running.
+     * Resolves to whether it said something.
+     */
+    async function showProgress(run: Run): Promise<boolean> {
       let p: Progress | null = null;
       if (run.status === 'running') {
         p = await api<{ progress: Progress | null }>(`/runs/${encodeURIComponent(run.id)}/progress`)
           .then((r) => r.progress)
           .catch(() => null);
       }
-      if (!current()) return;
+      if (!current()) return false;
       if (!p) {
         progressBox.replaceChildren();
-        return;
+        // A run requeued and started again says its progress again (R19.1-8).
+        saidProgress = null;
+        return false;
       }
       const list = await loadCatalog().catch(() => null);
+      if (!current()) return false;
       const lines = progressLines(p, list, Date.now());
       progressBox.replaceChildren(
         h('h2', {}, 'Progress'),
         ...[lines.running, lines.soFar, lines.step, lines.clock].filter((t): t is string => Boolean(t)).map((t) => h('p', {}, t)),
       );
       const said = [lines.running, lines.soFar].filter(Boolean).join(' ');
-      if (said !== saidProgress) {
-        announce(said);
-        saidProgress = said;
-      }
+      if (said === saidProgress) return false;
+      announce(said);
+      saidProgress = said;
+      return true;
     }
 
     async function refresh() {
@@ -700,6 +715,7 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
       }
       if (!current()) return;
       const key = `${run.status}|${run.run_results?.length ?? 0}`;
+      const nowRunning = shown !== null && key !== shown && run.status === 'running';
       if (key !== shown) {
         const list = await loadCatalog().catch(() => null);
         let available = new Set<string>();
@@ -724,7 +740,10 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
         if (shown !== null && run.status !== 'running') announce(run.status === 'done' || run.status === 'failed' ? finishedText(run) : `The run is ${STATUS[run.status]?.[0].toLowerCase() ?? run.status}.`);
         shown = key;
       }
-      await showProgress(run);
+      const spoke = await showProgress(run);
+      if (!current()) return;
+      // Said only if the progress said nothing: none yet, or the request failed (R19.1-3).
+      if (nowRunning && !spoke) announce('The run is running.');
       if (run.status === 'queued' || run.status === 'running') pollTimer = setTimeout(refresh, pollMs);
     }
     await refresh();

@@ -122,7 +122,8 @@ export function createHandler({ config, catalog, auth, userClient, version = "de
       return [502, { error: "The run could not be read. Try again in a moment." }];
     }
     if (!data) return [404, { error: "No such run, or it is not yours." }];
-    return [200, { progress: progress(id) ?? null }];
+    // The id as the database has it, so an upper-case one finds the run too (R19.1-8).
+    return [200, { progress: progress(data.id) ?? null }];
   }
 
   const routes = [
