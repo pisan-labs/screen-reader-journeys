@@ -1408,32 +1408,179 @@ describe("run-child.js sends the refusals left at the end (R9.3)", () => {
     assert.equal(told, proxy, "the main block can send what is left at a stop");
   });
 
-  it("at a stop, sends what is left at once and what came since before exiting, then exits once written (R20.1-3)", async () => {
-    const { stopSoon } = await import("../server/run-child.js");
-    const proxy = { blocked: ["a.example:443 (private)"] };
+  const stubProxy = () => ({ server: "http://127.0.0.1:1", blocked: [], close: async () => {} });
+  const resultOf = (mode, status = "pass") => ({ journey: "A", mode, status, expectations: [], findings: [] });
+
+  it("after a stop, starts no new journey or mode, and sends no result the stop made (R9.2)", async () => {
+    const { runJob } = await import("../server/run-child.js");
+    let stopping = false;
+    const runs = [];
+    const loads = [];
     const sent = [];
-    const out = { writableEnded: false, ends: 0, end(done) {
+    const writes = [];
+    const proxy = stubProxy();
+    const job = { allowedTargetHosts: "", journeys: [{ path: "a", file: "a" }, { path: "b", file: "b" }], modes: ["walker", "virtual"], outDir: "unused" };
+    await runJob(job, (m) => sent.push(m), {
+      startProxy: async () => proxy,
+      stopped: () => stopping,
+      load: async (file) => (loads.push(file), { file }),
+      write: async (results) => writes.push(results.length),
+      run: async (journey, { mode }) => {
+        runs.push(`${journey.file} ${mode}`);
+        if (runs.length === 1) return resultOf(mode);
+        // The stop comes during the second: the browser is closed under it.
+        stopping = true;
+        proxy.blocked.push("x.example:443 (private)");
+        return resultOf(mode, "error");
+      },
+    });
+    assert.deepEqual(runs, ["a walker", "a virtual"], "nothing started after the stop");
+    assert.deepEqual(loads, ["a"], "not even the next journey's file loaded");
+    assert.deepEqual(sent.filter((m) => m.type === "result").map((m) => m.result.mode), ["walker"], "only the result made before it");
+    assert.deepEqual(writes, [1], "nor saved");
+    assert.deepEqual(sent.at(-1), { type: "blocked", blocked: ["x.example:443 (private)"] }, "its refusals still go");
+  });
+
+  it("a stop that comes between two modes of a journey starts neither the next mode nor journey (R9.2)", async () => {
+    const { runJob } = await import("../server/run-child.js");
+    let stopping = false;
+    const runs = [];
+    const sent = [];
+    const job = { allowedTargetHosts: "", journeys: [{ path: "a", file: "a" }, { path: "b", file: "b" }], modes: ["walker", "virtual"], outDir: "unused" };
+    await runJob(job, (m) => sent.push(m), {
+      startProxy: async () => stubProxy(),
+      stopped: () => stopping,
+      load: async (file) => ({ file }),
+      // The stop comes while the first result's reports are written.
+      write: async () => (stopping = true),
+      run: async (journey, { mode }) => (runs.push(`${journey.file} ${mode}`), resultOf(mode)),
+    });
+    assert.deepEqual(runs, ["a walker"]);
+    assert.deepEqual(sent.filter((m) => m.type === "result").map((m) => m.result.mode), ["walker"], "made before the stop, so sent");
+  });
+
+  it("sends the latest step at the end of the wait, and no step once the journey has returned (R19.1-7)", async () => {
+    const { runJob } = await import("../server/run-child.js");
+    const sent = [];
+    let sawLast;
+    const last = new Promise((resolve) => (sawLast = resolve));
+    let late = () => {};
+    const job = { allowedTargetHosts: "", journeys: [{ path: "a", file: "a" }], modes: ["walker"], outDir: "unused" };
+    await runJob(job, (m) => {
+      sent.push(m);
+      if (m.step === "s5") sawLast();
+    }, {
+      startProxy: async () => stubProxy(),
+      load: async (file) => ({ file }),
+      write: async () => {},
+      progressEveryMs: 30,
+      run: async (_journey, { mode, onStep }) => {
+        for (let n = 1; n <= 5; n++) onStep({ action: `s${n}`, n });
+        await last;
+        late = onStep;
+        return resultOf(mode);
+      },
+    });
+    late({ action: "s6", n: 6 });
+    await new Promise((resolve) => setTimeout(resolve, 60)); // longer than the wait: no s6 comes
+    assert.deepEqual(sent.filter((m) => m.type === "progress").map((m) => m.step ?? "start"), ["start", "s1", "s5"]);
+  });
+
+  /** A stand-in for fd 3: what is written, when the end is written, and the exit, in order. */
+  const fakeOut = (log) => ({
+    writableEnded: false,
+    ends: 0,
+    write(line) {
+      log.push(JSON.parse(line));
+    },
+    end(...args) {
+      const done = args.pop();
+      if (args[0]) log.push(JSON.parse(args[0]));
       this.writableEnded = true;
       this.ends++;
-      setImmediate(done);
-    } };
-    // stopSoon's timers are unref'd, as the run process's own work keeps it alive; here, this does.
-    const alive = setInterval(() => {}, 1000);
-    after(() => clearInterval(alive));
-    const exited = new Promise((resolve) => stopSoon(() => proxy, (m) => sent.push(m), out, resolve, 20));
-    assert.deepEqual(sent, [{ type: "blocked", blocked: ["a.example:443 (private)"] }], "sent at once");
-    proxy.blocked.push("all connections (byte limit: the run moved its 100 MB through the network guard)");
-    assert.equal(await exited, 143);
-    assert.deepEqual(sent[1], { type: "blocked", blocked: ["all connections (byte limit: the run moved its 100 MB through the network guard)"] }, "the one made since");
-    assert.equal(out.ends, 1, "the messages are ended before the exit");
+      setImmediate(() => {
+        log.push("written");
+        done();
+      });
+    },
+  });
+  const LIMIT = "all connections (byte limit: the run moved its 100 MB through the network guard)";
 
-    // Messages already ended (the job's own end came first): it still exits, without ending again.
-    const ended = { writableEnded: true, ends: 0, end() {
-      this.ends++;
-    } };
-    assert.equal(await new Promise((resolve) => stopSoon(() => null, () => {}, ended, resolve, 0)), 143);
-    assert.equal(ended.ends, 0);
-    clearInterval(alive);
+  it("runs the job, then sends done (or the error) and exits 0 once that is written", async () => {
+    const { runProcess } = await import("../server/run-child.js");
+    for (const [run, last] of [
+      [async (_job, send) => send({ type: "result" }), { type: "done" }],
+      [async () => {
+        throw new Error("no such journey\nat line 2");
+      }, { type: "error", message: "no such journey" }],
+    ]) {
+      const log = [];
+      await new Promise((exited) => {
+        const runner = runProcess({ out: fakeOut(log), exit: (code) => exited(log.push(`exit ${code}`)), run });
+        runner.start("{}");
+      });
+      assert.deepEqual(log.filter((e) => e.type !== "result"), [last, "written", "exit 0"]);
+    }
+  });
+
+  it("at a stop: no new work, what is left at once, what came since once the job has ended, then exit 143 after the end is written (R20.2-1, R20.2-2)", async () => {
+    const { runProcess } = await import("../server/run-child.js");
+    const log = [];
+    const proxy = { blocked: ["a.example:443 (private)"] };
+    let stopped = () => false;
+    let endJob;
+    const run = (_job, _send, options) => {
+      options.onProxy(proxy);
+      stopped = options.stopped;
+      // The job ends after the stop; its proxy's close trips the byte limit on the way.
+      return new Promise((resolve) => (endJob = () => resolve(proxy.blocked.push(LIMIT))));
+    };
+    const exited = new Promise((resolve) => {
+      const runner = runProcess({ out: fakeOut(log), exit: (code) => resolve(log.push(`exit ${code}`)), run, graceMs: 60_000 });
+      runner.start("{}");
+      assert.equal(stopped(), false);
+      runner.stop();
+    });
+    assert.equal(stopped(), true, "the job is told, so it starts nothing new");
+    assert.deepEqual(log, [{ type: "blocked", blocked: ["a.example:443 (private)"] }], "sent at once, and nothing ended before the job has");
+    endJob();
+    await exited;
+    assert.deepEqual(log.slice(1), [{ type: "blocked", blocked: [LIMIT] }, "written", "exit 143"], "the one made since, then the end, then the exit; no done");
+  });
+
+  it("at a stop, when the job does not end: ends after graceMs, and a stop after the end writes nothing more", async () => {
+    const { runProcess } = await import("../server/run-child.js");
+    // The timers are unref'd, as the run process's own work keeps it alive; here, this does.
+    const alive = setInterval(() => {}, 1000);
+    try {
+      const log = [];
+      const proxy = { blocked: [] };
+      await new Promise((resolve) => {
+        const runner = runProcess({ out: fakeOut(log), exit: (code) => resolve(log.push(`exit ${code}`)), graceMs: 20, run: (_job, _send, options) => {
+          options.onProxy(proxy);
+          return new Promise(() => {});
+        } });
+        runner.start("{}");
+        runner.stop();
+        proxy.blocked.push(LIMIT);
+      });
+      assert.deepEqual(log, [{ type: "blocked", blocked: [LIMIT] }, "written", "exit 143"]);
+
+      // The job's own end came first: a later stop sends nothing and ends nothing, and still exits.
+      const after = [];
+      const out = fakeOut(after);
+      const exits = [];
+      const late = { blocked: [] };
+      let exited = () => {};
+      const runner = runProcess({ out, exit: (code) => exited(exits.push(code)), run: async (_job, _send, options) => options.onProxy(late) });
+      await new Promise((resolve) => ((exited = resolve), runner.start("{}")));
+      late.blocked.push("late.example:443 (private)");
+      await new Promise((resolve) => ((exited = resolve), runner.stop()));
+      assert.deepEqual(after, [{ type: "done" }, "written"]);
+      assert.deepEqual([out.ends, exits], [1, [0, 143]]);
+    } finally {
+      clearInterval(alive);
+    }
   });
 
   it("writes nothing once the messages have ended (R20.1-3)", async () => {
