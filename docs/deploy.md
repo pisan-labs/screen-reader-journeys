@@ -170,6 +170,13 @@ turned off, because every build costs credits. Docs-only commits carry `[skip ne
 | `VITE_SUPABASE_URL` | `https://auth.hintwise.org` | `netlify.toml` |
 | `VITE_SUPABASE_ANON_KEY` | the public anon key. The build refuses a service-role key | `netlify.toml` |
 | `VITE_API_URL` | the Render service's address, without a trailing slash | the site's environment variables |
+| `VITE_SITE_URL` | `https://screen-reader-journeys.hintwise.org`, the dashboard's one address | `netlify.toml` |
+
+- **One address.** Opened anywhere else (over http, under the netlify.app name, at a deploy's own
+  address or a Deploy Preview), the page first moves to `VITE_SITE_URL`, keeping its path, query
+  and hash, and sign-in always returns there (`web/src/canonical.ts`). Otherwise Supabase would
+  refuse the return address and fall back to the shared project's `site_url`, another app. Without
+  `VITE_SITE_URL` (local work) the page stays where it is.
 
 - **The build:** `tsc` and `vite build`.
 - **The Content-Security-Policy** goes in `_headers`. It allows exactly the Supabase URL and the

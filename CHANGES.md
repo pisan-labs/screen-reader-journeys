@@ -61,3 +61,5 @@ Append-only journal, oldest first. Earlier history: `git log` and `docs/handoff.
 2026-11-24 [decision] PManager: #14 merged as c2dc383; R5.1 to R5.3 listed in issue #15; a small PR for R5.1 before the service takes others' runs.
 
 2026-11-24 [code] R5.1: the run summary is kept under 48 KiB of JSON (names and blocked entries cut by code point, then trimmed); per-file log lines capped at 30.
+
+2026-11-24 [code] The dashboard has one address (VITE_SITE_URL): opened elsewhere it moves there first, and sign-in returns there; the owner's first sign-in had landed on another app.
