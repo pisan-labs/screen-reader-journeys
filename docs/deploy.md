@@ -315,6 +315,10 @@ where you can.
   - When Playwright is updated, change the `Dockerfile`'s image tag to the same version.
 - **Timeouts.** A run that takes longer than `RUN_TIMEOUT_SECONDS` is stopped, browser included.
   The journeys that finished keep their results.
+  - Each journey opens its page when the page's load event fires, within 120 s, then waits at most
+    5 s more for the network to go quiet. A page that keeps a request open (an ad or analytics
+    request, a long poll, a stream) is tested anyway; one whose load event never fires is not
+    (`src/journey.js`, `LOAD_TIMEOUT_MS` and `IDLE_WAIT_MS`).
   - When Render restarts the service (a deploy, say), the run in progress goes back in the queue.
   - A run left `running` by a service that crashed is marked failed ten minutes after its timeout.
 - **Limits.**

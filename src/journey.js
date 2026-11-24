@@ -203,14 +203,29 @@ class Session {
 }
 
 /**
+ * How long a page may take to fire its load event. A heavy page on a slow host needs far more
+ * than Playwright's 30 s: https://www.washington.edu/ fired it after 5 s here, and after 42 to
+ * 50 s at 0.1 CPU (Render's free plan), so this leaves about 2.4 times that.
+ */
+export const LOAD_TIMEOUT_MS = 120_000;
+
+/**
+ * After load, how long to wait, at most, for the network to go quiet (500 ms with no request
+ * open). A page with a request that never ends (an analytics beacon, a long poll, a stream)
+ * never goes quiet; it is tested all the same, once this has passed.
+ */
+export const IDLE_WAIT_MS = 5_000;
+
+/**
  * Run one journey in one mode. `baseUrl` is the site under test, e.g. a pull request's preview.
  * `launchOptions` go to Playwright's browser launch (the hosted server uses them for its network
- * guard proxy).
+ * guard proxy). `loadTimeoutMs` and `idleWaitMs` (LOAD_TIMEOUT_MS, IDLE_WAIT_MS) bound the opening
+ * of the page.
  *
  * @param {any} journey
- * @param {{ mode: string, baseUrl: string, headed?: boolean, launchOptions?: { args?: string[], [key: string]: any }, onStep?: ((step: any) => void) | null }} options
+ * @param {{ mode: string, baseUrl: string, headed?: boolean, launchOptions?: { args?: string[], [key: string]: any }, onStep?: ((step: any) => void) | null, loadTimeoutMs?: number, idleWaitMs?: number }} options
  */
-export async function runJourney(journey, { mode, baseUrl, headed = false, launchOptions = {}, onStep = null }) {
+export async function runJourney(journey, { mode, baseUrl, headed = false, launchOptions = {}, onStep = null, loadTimeoutMs = LOAD_TIMEOUT_MS, idleWaitMs = IDLE_WAIT_MS }) {
   const Driver = DRIVERS[mode];
   if (!Driver) throw new Error(`Unknown mode "${mode}". Modes: ${Object.keys(DRIVERS).join(", ")}`);
   const url = new URL(journey.start, baseUrl).href;
@@ -257,7 +272,11 @@ export async function runJourney(journey, { mode, baseUrl, headed = false, launc
       list.push(String(error).split("\n")[0]);
     });
     if (journey.setup) await journey.setup(page);
-    await page.goto(url, { waitUntil: "networkidle", timeout: 30000 });
+    // The load event, then a moment of network quiet if it comes. Waiting for quiet alone failed
+    // every page that keeps a request open, such as https://www.washington.edu/ (an ad
+    // conversion request that never ends).
+    await page.goto(url, { waitUntil: "load", timeout: loadTimeoutMs });
+    await page.waitForLoadState("networkidle", { timeout: idleWaitMs }).catch(() => {});
     if (journey.ready) await page.locator(journey.ready).first().waitFor({ timeout: 20000 });
     await settle(page, 300);
     driver.page = page;

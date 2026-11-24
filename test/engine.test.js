@@ -82,3 +82,42 @@ describe("focus inside an open shadow root", () => {
     });
   }
 });
+
+describe("opening the page", () => {
+  // /open.html keeps a request open for ever (as an ad or analytics script can); /stuck.html has
+  // an image that never arrives, so its load event never fires.
+  let server;
+  let base;
+  before(async () => {
+    const { createServer } = await import("node:http");
+    const pages = {
+      "/open.html": '<!doctype html><title>Open</title><button>One</button> <button>Two</button><script>fetch("/forever")</script>',
+      "/stuck.html": '<!doctype html><title>Stuck</title><button>One</button><img alt="" src="/forever">',
+    };
+    server = createServer((req, res) => {
+      if (req.url === "/forever") return; // never answered
+      if (!pages[req.url]) return res.writeHead(404).end();
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(pages[req.url]);
+    });
+    await new Promise((done) => server.listen(0, "127.0.0.1", done));
+    base = `http://127.0.0.1:${server.address().port}/`;
+  });
+  after(() => {
+    server.closeAllConnections();
+    server.close();
+  });
+
+  it("tests a page that keeps a request open, once its load event has fired", async () => {
+    const journey = { name: "Open request", start: "/open.html", run: (sr) => sr.walkTabOrder() };
+    const result = await runJourney(journey, { mode: "walker", baseUrl: base, idleWaitMs: 1000 });
+    assert.equal(result.status, "pass", result.error);
+    assert.ok(result.steps.length >= 2, "it walked the page");
+  });
+
+  it("still gives up on a page whose load event never fires", async () => {
+    const journey = { name: "Stuck", start: "/stuck.html", run: (sr) => sr.walkTabOrder() };
+    const result = await runJourney(journey, { mode: "walker", baseUrl: base, loadTimeoutMs: 2000 });
+    assert.equal(result.status, "error");
+    assert.match(result.error, /page\.goto: Timeout 2000ms exceeded/);
+  });
+});
