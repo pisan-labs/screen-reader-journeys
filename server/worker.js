@@ -51,10 +51,13 @@ const LOGGED_EACH = 30;
  * reason) still shows.
  */
 const cut = (text, max) => {
-  const chars = Array.from(text);
-  if (chars.length <= max) return text;
-  const tail = Math.floor((max - 1) / 4);
-  return `${chars.slice(0, max - 1 - tail).join("")}…${chars.slice(-tail).join("")}`;
+  const whole = String(text);
+  if (whole.length <= 2 * max) {
+    const points = Array.from(clean(whole));
+    if (points.length <= max) return points.join("");
+  }
+  const tail = Math.max(0, Math.floor((max - 1) / 4));
+  return `${headOf(whole, Math.max(0, max - 1 - tail))}…${tailOf(whole, tail)}`;
 };
 
 /** A list of paths as the run user's child may answer it: relative, short, no "..", no NUL. */
@@ -90,11 +93,22 @@ const CONTENT_TYPES = {
   ".txt": "text/plain; charset=utf-8",
 };
 
-// Both cut by code point, never inside a surrogate pair: half of one is not valid in jsonb, and
-// the database would refuse the whole run's record.
+// Text from the run process goes into the run's record, which the database refuses whole if a
+// string holds a lone surrogate or a NUL. So `clean` makes it well formed (U+FFFD for both), and
+// `short` and `cut` cut it by code point, never inside a surrogate pair. They look at a bounded
+// slice of their input only, however long it is.
+const clean = (text) => text.toWellFormed().replaceAll("\u0000", "\uFFFD");
+/** The first `n` code points of `text`, from a slice of at most 2n + 2 units. */
+const headOf = (text, n) => Array.from(clean(text.slice(0, 2 * n + 2))).slice(0, n).join("");
+/** The last `n` code points of `text`, from a slice of at most 2n + 2 units. */
+const tailOf = (text, n) => (n > 0 ? Array.from(clean(text.slice(-(2 * n + 2)))).slice(-n).join("") : "");
+
+/** The first line of `text`, cut to `max` code points with an ellipsis. */
 const short = (text, max = 500) => {
-  const line = Array.from(String(text ?? "").split("\n")[0]);
-  return line.length > max ? `${line.slice(0, max - 1).join("")}…` : line.join("");
+  const start = String(text ?? "").slice(0, 2 * max + 2);
+  const line = start.split("\n")[0];
+  const points = Array.from(clean(line));
+  return points.length > max ? `${points.slice(0, max - 1).join("")}…` : points.join("");
 };
 
 export function summarizeRun({ results, blocked, outcome }, files, skipped = []) {
@@ -261,7 +275,8 @@ export function createWorker({
     let unlogged = 0;
     const leaveOut = (file, why) => {
       skipped.push(file);
-      if (skipped.length <= LOGGED_EACH) log.log(`run ${runId}: left out ${cut(file, NAME_CHARS)} (${why})`);
+      // Quoted, and the reason cut to its first line, so a name cannot forge a log line.
+      if (skipped.length <= LOGGED_EACH) log.log(`run ${runId}: left out ${JSON.stringify(cut(file, NAME_CHARS))} (${short(why, 300)})`);
       else unlogged += 1;
     };
     // Once the run's reports are full, or the save has taken too long, every file still waiting
@@ -428,7 +443,7 @@ export function createWorker({
       }
     };
     try {
-      log.log(`run ${run.id}: started (${run.base_url})`);
+      log.log(`run ${run.id}: started (${JSON.stringify(short(run.base_url, 2100))})`);
       // Check again: a user can insert a queued run straight into the table, past the API.
       const request = validateRunRequest(run, { catalog, rules: config.targetRules });
       if (!request.ok) return await finish(run, { status: "failed", error: `Refused: ${request.errors.map((e) => e.message).join(" ")}` });

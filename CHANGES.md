@@ -65,3 +65,7 @@ Append-only journal, oldest first. Earlier history: `git log` and `docs/handoff.
 2026-11-24 [scope] Owner (via PManager): any signed-in person may test any public address; built as ALLOWED_TARGET_HOSTS="*", the allow-list stays the default.
 
 2026-11-24 [code] "*" rule: public hosts only, ports 80 and 443, checked at queue, run start and every connection; migration 0002 adds 10 runs per person per UTC day.
+
+2026-11-24 [decision] PManager: daily cap 10 per UTC day, one constant (daily_run_limit()); 80/443 for hosts not listed exactly in every mode; R6.2 folded into this PR.
+
+2026-11-24 [code] R6.2: the run process's messages are checked (shape, counts, strings), text made well formed and cut from bounded slices, names quoted in the log.

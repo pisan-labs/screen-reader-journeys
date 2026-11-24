@@ -245,6 +245,32 @@ describe("worker, with a fake run process", () => {
     });
   });
 
+  it("cuts a run's error by code point, so half an emoji never reaches the database (R6.1, R6.2)", async () => {
+    const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+    const fake = fakeSupabase({ runs: [run] });
+    // A NUL and a lone surrogate first, then an emoji across the cut by code unit (units 498-499).
+    const execute = async () => ({ outcome: "error", error: `\u0000\ud800${"x".repeat(496)}\u{1F600}${"y".repeat(50)}`, results: [], blocked: [] });
+    await createWorker({ db: dbOf(fake), catalog, config, execute, lookup, log: quiet }).tick();
+    const { error } = fake.run(run.id);
+    assert.ok(error.isWellFormed(), "no lone surrogate");
+    assert.ok(!error.includes("\u0000"), "no NUL");
+    assert.ok(error.includes("\u{1F600}"), "the emoji is kept whole");
+    assert.ok(Array.from(error).length <= 500);
+  });
+
+  it("quotes a file's name in the log, so a newline in it cannot forge a line (R6.2)", async () => {
+    const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+    const fake = fakeSupabase({ runs: [run] });
+    const execute = async (job) => {
+      await writeFile(join(job.outDir, "x\nrun 1: done.bin"), "x");
+      return { outcome: "done", error: null, results: [summary(BASIC, "walker")], blocked: [] };
+    };
+    const lines = [];
+    await createWorker({ db: dbOf(fake), catalog, config, execute, lookup, log: { log: (m) => lines.push(m), error: (m) => lines.push(m) } }).tick();
+    assert.ok(lines.some((m) => m.includes('left out "x\\nrun 1: done.bin"')), lines.join("\n"));
+    assert.ok(lines.every((m) => !m.includes("\n")), "no line holds a newline");
+  });
+
   it("hands the run process only the checked job", async () => {
     const run = queued({ base_url: `https://${HOST}/x`, journeys: [BASIC, BASIC], modes: ["walker", "virtual"] });
     const fake = fakeSupabase({ runs: [run] });
@@ -368,7 +394,7 @@ describe("worker, with a fake run process", () => {
     // The too-long name is named, cut in the middle to 200 characters, so its extension shows.
     assert.equal(long.length, 200);
     assert.match(long, /^x+…x+\.md$/);
-    assert.ok(logged.some((line) => /left out a\.md \(worker_save_report: A run keeps at most 20 MiB/.test(line)), logged.join("\n"));
+    assert.ok(logged.some((line) => /left out "a\.md" \(worker_save_report: A run keeps at most 20 MiB/.test(line)), logged.join("\n"));
     assert.equal(fake.tables.run_results.length, 1, "the results are kept");
   });
 
@@ -923,6 +949,58 @@ describe("a run's summary fits the database's 64 KiB check (R5.1)", () => {
   });
 });
 
+describe("the run process's output is checked before it is used (R6.2)", () => {
+  /** Run a probe in place of run-child.js that sends `messages`, then exits. */
+  const probe = async (messages) => {
+    const folder = await mkdtemp(join(tmpdir(), "srj-probe-"));
+    try {
+      const file = join(folder, "probe.mjs");
+      await writeFile(file, `process.on("message", () => { for (const m of ${JSON.stringify(messages)}) process.send(m); process.disconnect(); });\n`);
+      return await executeRun({}, { timeoutMs: 10000, child: file });
+    } finally {
+      await rm(folder, { recursive: true, force: true });
+    }
+  };
+  const good = { journey: "targets/x.journey.js", name: "X", mode: "walker", status: "pass", error: null, checks_total: 2, checks_passed: 2, errors: 0, warnings: 1, report_base: "x.walker" };
+
+  it("takes well-formed results and refusals, and cuts long refusals", async () => {
+    const outcome = await probe([{ type: "result", result: good, blocked: ["a.example:443 (private)", "b".repeat(5000)] }, { type: "done" }]);
+    assert.equal(outcome.outcome, "done");
+    assert.deepEqual(outcome.results, [good]);
+    assert.deepEqual(outcome.blocked.map((b) => b.length), [23, 2000]);
+  });
+
+  for (const [what, message] of [
+    ["refusals that are not a list (this crashed the server)", { type: "result", result: good, blocked: {} }],
+    ["a refusal that is not a string", { type: "result", result: good, blocked: [null] }],
+    ["a refusal with a huge length", { type: "result", result: good, blocked: [{ length: 5e7 }] }],
+    ["a count that is not a number", { type: "result", result: { ...good, errors: "999" } }],
+    ["a negative count", { type: "result", result: { ...good, warnings: -1 } }],
+    ["more checks passed than made", { type: "result", result: { ...good, checks_passed: 3 } }],
+    ["a status it does not know", { type: "result", result: { ...good, status: "great" } }],
+    ["no result", { type: "result" }],
+    ["an error that is not text", { type: "error", message: { toString: 1 } }],
+    ["a message of no known type", { type: "surprise" }],
+  ]) {
+    it(`ends the run as an error on ${what}`, async () => {
+      const outcome = await probe([message, { type: "done" }]);
+      assert.equal(outcome.outcome, "error");
+      assert.equal(outcome.error, "The run process sent a malformed message.");
+      assert.deepEqual(outcome.results, []);
+    });
+  }
+
+  it("stores only well-formed text: no lone surrogate and no NUL in names, refusals or errors", () => {
+    const summary = summarizeRun({ results: [], blocked: ["host\u0000.example:443 (private)", "\ud800x.example:443 (private)"], outcome: "done" }, [], ["\ud800.md", "a\u0000b.md"]);
+    for (const text of [...summary.skipped_files, ...summary.blocked_requests]) {
+      assert.ok(text.isWellFormed() && !text.includes("\u0000"), JSON.stringify(text));
+    }
+    assert.deepEqual(summary.skipped_files, ["\uFFFD.md", "a\uFFFDb.md"]);
+    const long = summarizeRun({ results: [], blocked: ["z".repeat(10_000_000)], outcome: "done" }, [], []);
+    assert.equal(Array.from(long.blocked_requests[0]).length, 300, "a huge entry is cut from a bounded slice");
+  });
+});
+
 describe("run process environment", () => {
   it("passes only a short list of harmless variables", () => {
     const env = childEnv({ PATH: "/bin", HOME: "/home/x", PLAYWRIGHT_BROWSERS_PATH: "/ms-playwright", SUPABASE_URL: "u", SUPABASE_SERVICE_ROLE_KEY: "k", SUPABASE_ANON_KEY: "a", WORKER_TOKEN: "w", GITHUB_TOKEN: "t", AWS_SECRET_ACCESS_KEY: "s", DB_PASSWORD: "p", DATABASE_URL: "postgres://u:p@h/db", RENDER_API: "x", PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK: "1" });
@@ -937,13 +1015,14 @@ describe("run process environment", () => {
     try {
       await writeFile(join(folder, ".env"), "SRJ_PROBE_FROM_DOTENV=leaked\n");
       const probe = join(folder, "probe.mjs");
-      await writeFile(probe, 'process.on("message", () => { process.send({ type: "result", result: { execArgv: process.execArgv, fromDotenv: process.env.SRJ_PROBE_FROM_DOTENV ?? null } }); process.send({ type: "done" }); process.disconnect(); });\n');
+      // It reports through an "error" message, the one kind that carries free text.
+      await writeFile(probe, 'process.on("message", () => { process.send({ type: "error", message: JSON.stringify({ execArgv: process.execArgv, fromDotenv: process.env.SRJ_PROBE_FROM_DOTENV ?? null }) }); process.disconnect(); });\n');
       const execute = new URL("../server/execute.js", import.meta.url).href;
       const parent = `import(${JSON.stringify(execute)}).then(async ({ executeRun }) => { const r = await executeRun({}, { timeoutMs: 10000, child: ${JSON.stringify(probe)} }); console.log(JSON.stringify(r)); });`;
       const { stdout } = await promisify(execFile)(process.execPath, ["--env-file-if-exists=.env", "--input-type=module", "-e", parent], { cwd: folder, env: { PATH: process.env.PATH } });
       const outcome = JSON.parse(stdout.trim().split("\n").pop());
-      assert.equal(outcome.outcome, "done", stdout);
-      assert.deepEqual(outcome.results, [{ execArgv: [], fromDotenv: null }]);
+      assert.equal(outcome.outcome, "error", stdout);
+      assert.deepEqual(JSON.parse(outcome.error), { execArgv: [], fromDotenv: null });
     } finally {
       await rm(folder, { recursive: true, force: true });
     }
