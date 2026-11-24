@@ -81,3 +81,5 @@ Append-only journal, oldest first. Earlier history: `git log` and `docs/handoff.
 2026-11-24 [decision] PManager (T1): every wildcard rule needs the sandbox gate too (R8.3); round 3 is #17's last round.
 
 2026-11-24 [code] #17 round 3: the byte limit counts the browser's sockets (headers, uploads, tunnels), 500 host names a run, 256 KB messages, wildcards gated.
+
+2026-11-24 [doc] Owner: the dashboard says what the site does and how it relates to STEM Accessibility, linking https://github.com/stem-accessibility/frontend.
