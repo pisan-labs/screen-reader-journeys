@@ -319,11 +319,12 @@ where you can.
     15 s more for the network to go quiet (and up to 20 s more for a journey's `ready` element),
     all within the run's `RUN_TIMEOUT_SECONDS` (`src/journey.js`, `LOAD_TIMEOUT_MS` and
     `IDLE_WAIT_MS`). A page that keeps a request open (an ad or analytics request, a long poll, a
-    stream) is tested anyway, and its report, its transcript and `summary.md` say the page may
-    still have been loading and the walk may be incomplete. A page whose load event never fires
-    is not tested, and since a run's journeys all open the same site, the rest of the run is then
-    not run either: each of its journeys and modes says why, and the worker is free again in
-    about two minutes, not after the whole run timeout.
+    stream) is tested anyway, and its reports (Markdown and HTML), its transcript and the run's
+    summary say the page may still have been loading and the walk may be incomplete. A page
+    whose load event never fires is not tested, and the run's other journeys and modes that open
+    that same page are not run either. Each gets a report that says why ("Not run: … did not load
+    in an earlier journey"), and the worker is free again in about two minutes, not after the
+    whole run timeout. Only the opening load counts: a later navigation that times out does not.
   - When Render restarts the service (a deploy, say), the run in progress goes back in the queue.
   - A run left `running` by a service that crashed is marked failed ten minutes after its timeout.
 - **Limits.**

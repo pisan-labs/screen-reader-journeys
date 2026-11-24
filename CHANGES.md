@@ -93,4 +93,4 @@ Append-only journal, oldest first. Earlier history: `git log` and `docs/handoff.
 
 2026-11-24 [code] #20 round 1: a run keeps at most 200 different refusals and one byte-limit entry (R20.1-1); at a stop, late refusals are sent before the exit, tested end to end.
 
-2026-11-24 [code] Pages open on their load event (120 s), then wait up to 15 s for network quiet, noted if it never comes; a site that does not load ends its run's other journeys.
+2026-11-24 [code] Pages open on their load event (120 s), then wait up to 15 s for network quiet, noted if it never comes; a page that does not load skips its run's others, each reported.

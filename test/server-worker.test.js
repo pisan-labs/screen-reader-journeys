@@ -1396,11 +1396,13 @@ describe("run-child.js, with \"*\" or a wildcard (R8.2)", () => {
   });
 });
 
-describe("run-child.js, when the site does not load (R22.1-2)", () => {
-  const job = (outDir) => ({ allowedTargetHosts: "", journeys: [{ path: BASIC, file: join(fixtures, "basic.journey.js") }, { path: HANG, file: join(fixtures, "hang.journey.js") }], modes: ["walker", "virtual"], outDir });
+describe("run-child.js, when a journey's page does not load (R22.1-2, R22.2)", () => {
+  // Basic and Hang both open /basic.html; Egress opens /egress.html.
+  const BASE = "http://127.0.0.1:1/";
+  const job = (outDir) => ({ allowedTargetHosts: "", baseUrl: BASE, journeys: [BASIC, HANG, EGRESS].map((path) => ({ path, file: join(REPO_ROOT, path) })), modes: ["walker", "virtual"], outDir });
   const stubProxy = () => ({ server: "http://127.0.0.1:1", blocked: [], close: async () => {} });
-  const resultOf = (journey, mode, error) => ({ journey: journey.name, description: "", mode, modeLabel: mode, url: "http://127.0.0.1:1/", startedAt: new Date().toISOString(), status: error ? "error" : "pass", error, steps: [], expectations: [], findings: [], pageErrors: [], toolErrors: [] });
-  const runWith = async (error) => {
+  const resultOf = (journey, mode, url, failure) => ({ journey: journey.name, description: "", mode, modeLabel: mode, url, startedAt: new Date().toISOString(), status: failure ? "error" : "pass", error: failure?.error ?? null, ...(failure?.notLoaded ? { notLoaded: true } : {}), steps: [], expectations: [], findings: [], pageErrors: [], toolErrors: [] });
+  const runWith = async (failure) => {
     const { runJob } = await import("../server/run-child.js");
     const out = await mkdtemp(join(tmpdir(), "srj-unloaded-"));
     const runs = [];
@@ -1408,24 +1410,47 @@ describe("run-child.js, when the site does not load (R22.1-2)", () => {
     try {
       await runJob(job(out), (m) => sent.push(m), {
         startProxy: async () => stubProxy(),
-        run: async (journey, { mode }) => (runs.push(`${journey.name} ${mode}`), resultOf(journey, mode, runs.length === 1 ? error : null)),
+        run: async (journey, { mode, baseUrl }) => (runs.push(`${journey.name} ${mode}`), resultOf(journey, mode, new URL(journey.start, baseUrl).href, runs.length === 1 ? failure : null)),
       });
+      return { runs, results: sent.filter((m) => m.type === "result").map((m) => m.result) };
     } finally {
       await rm(out, { recursive: true, force: true });
     }
-    return { runs, results: sent.filter((m) => m.type === "result").map((m) => m.result) };
   };
+  const failed = { error: "page.goto: Timeout 120000ms exceeded.", notLoaded: true };
+  const why = `Not run: ${BASE}basic.html did not load in an earlier journey (page.goto: Timeout 120000ms exceeded.)`;
 
-  it("runs no more journeys once one's page did not load, and says why for each", async () => {
-    const { runs, results } = await runWith("page.goto: Timeout 120000ms exceeded.");
-    assert.deepEqual(runs, ["Basic test page walker"], "no more browsers opened");
-    assert.deepEqual(results.map((r) => [r.journey, r.mode, r.status]), [[BASIC, "walker", "error"], [BASIC, "virtual", "error"], [HANG, "walker", "error"], [HANG, "virtual", "error"]], "a result for every journey and mode");
-    for (const r of results.slice(1)) assert.equal(r.error, "Not run: the site did not load in an earlier journey (page.goto: Timeout 120000ms exceeded.)");
+  it("runs no more journeys and modes that open the page that did not load, and says why in each one's result and report", async () => {
+    const { runs, results } = await runWith(failed);
+    assert.deepEqual(runs, ["Basic test page walker", "Egress test page walker", "Egress test page virtual"], "only the journey that opens another page ran");
+    assert.deepEqual(results.map((r) => [r.journey, r.mode, r.status]), [[BASIC, "walker", "error"], [BASIC, "virtual", "error"], [HANG, "walker", "error"], [HANG, "virtual", "error"], [EGRESS, "walker", "pass"], [EGRESS, "virtual", "pass"]]);
+    for (const r of results.slice(1, 4)) assert.equal(r.error, why);
   });
 
-  it("goes on after any other error", async () => {
-    const { runs } = await runWith("locator.waitFor: Timeout 20000ms exceeded.");
-    assert.equal(runs.length, 4);
+  it("writes a report for each journey and mode it did not run (R22.2-1)", async () => {
+    const out = await mkdtemp(join(tmpdir(), "srj-unloaded-"));
+    try {
+      const { runJob } = await import("../server/run-child.js");
+      const runs = [];
+      await runJob(job(out), () => {}, {
+        startProxy: async () => stubProxy(),
+        run: async (journey, { mode, baseUrl }) => (runs.push(1), resultOf(journey, mode, new URL(journey.start, baseUrl).href, runs.length === 1 ? failed : null)),
+      });
+      const report = readFileSync(join(out, "hanging-journey.walker.md"), "utf8");
+      assert.ok(report.includes(`(${why})`), report.slice(0, 400));
+      assert.match(readFileSync(join(out, "summary.md"), "utf8"), /Hanging journey/);
+    } finally {
+      await rm(out, { recursive: true, force: true });
+    }
+  });
+
+  it("goes on after a timeout that is not the opening load, even one with the same words (R22.2-2)", async () => {
+    // A journey's own later navigation can time out as "page.goto: Timeout": only runJourney's
+    // notLoaded, for the opening load, ends the others.
+    const { runs } = await runWith({ error: "page.goto: Timeout 30000ms exceeded." });
+    assert.equal(runs.length, 6);
+    const other = await runWith({ error: "locator.waitFor: Timeout 20000ms exceeded." });
+    assert.equal(other.runs.length, 6);
   });
 });
 

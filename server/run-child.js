@@ -5,7 +5,7 @@
 
 import { createWriteStream } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { loadJourney, runJourney } from "../src/journey.js";
+import { loadJourney, runJourney, skippedResult, startUrl } from "../src/journey.js";
 import { slug, writeReports } from "../src/report.js";
 import { startEgressProxy } from "./egress-proxy.js";
 import { needsSandbox, parseAllowedHosts } from "./hosts.js";
@@ -40,22 +40,15 @@ export function sendLeftover(proxy, send) {
   if (left.length) send({ type: "blocked", blocked: left });
 }
 
-/** A journey whose page did not load in time (src/journey.js, LOAD_TIMEOUT_MS). */
-const LOAD_TIMED_OUT = /^page\.goto: Timeout \d+ms exceeded/;
-
-/** The result of a journey and mode that was not run, and why. */
-export function notRun(journey, path, mode, why) {
-  return { journey: path, name: journey.name, mode, status: "error", error: why, checks_total: 0, checks_passed: 0, errors: 0, warnings: 0, report_base: `${slug(journey.name)}.${mode}` };
-}
-
 /**
  * job: { baseUrl, journeys: [{ path, file }], modes, outDir, allowedTargetHosts, chromiumSandbox }
  * send(message): receives { type: "result", result, blocked } after each journey and mode, and
  * { type: "blocked", blocked } with any refusals left at the end.
  *
- * Every journey of a run opens the same site. Once one's page has not loaded in time, the rest are
- * not run, so a site that never loads does not hold the one worker for the whole run timeout:
- * each gets a result that says why (R22.1-2).
+ * Once a journey's page has not loaded in time (runJourney's `notLoaded`), the run's other
+ * journeys and modes that open that same page are not run, so a site that never loads does not
+ * hold the one worker for the whole run timeout (R22.1-2, R22.2-3). Each gets a full result and a
+ * report that says why (R22.2-1).
  *
  * @param {any} job
  * @param {(message: object) => void} send
@@ -76,13 +69,18 @@ export async function runJob(job, send, { lookup, startProxy = startEgressProxy,
     args: ["--disable-quic", "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"],
   };
   const results = [];
-  let unreachable = null;
+  /** Start pages that did not load, and why the journeys that open them are not run. */
+  const unloaded = new Map();
   try {
     for (const { path, file } of job.journeys) {
       const journey = await loadJourney(file);
       for (const mode of job.modes) {
-        if (unreachable) {
-          send({ type: "result", result: notRun(journey, path, mode, unreachable), blocked: proxy.blocked.splice(0) });
+        const why = unloaded.get(startUrl(journey, job.baseUrl));
+        if (why) {
+          const skipped = skippedResult(journey, { mode, baseUrl: job.baseUrl }, why);
+          results.push(skipped);
+          await writeReports(results, job.outDir);
+          send({ type: "result", result: summarizeResult(skipped, path), blocked: proxy.blocked.splice(0) });
           continue;
         }
         // Progress for the run's page: this journey and mode, then its steps, at most one a second.
@@ -94,7 +92,7 @@ export async function runJob(job, send, { lookup, startProxy = startEgressProxy,
           send({ type: "progress", journey: path, mode, step: String(step.action).slice(0, 200), n: step.n });
         };
         const result = await run(journey, { mode, baseUrl: job.baseUrl, launchOptions, onStep });
-        if (LOAD_TIMED_OUT.test(result.error ?? "")) unreachable = `Not run: the site did not load in an earlier journey (${result.error})`;
+        if (result.notLoaded) unloaded.set(result.url, `Not run: ${result.url} did not load in an earlier journey (${result.error})`);
         results.push(result);
         await writeReports(results, job.outDir);
         send({ type: "result", result: summarizeResult(result, path), blocked: proxy.blocked.splice(0) });

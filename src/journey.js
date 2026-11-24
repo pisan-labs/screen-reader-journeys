@@ -220,20 +220,9 @@ export const LOAD_TIMEOUT_MS = 120_000;
  */
 export const IDLE_WAIT_MS = 15_000;
 
-/**
- * Run one journey in one mode. `baseUrl` is the site under test, e.g. a pull request's preview.
- * `launchOptions` go to Playwright's browser launch (the hosted server uses them for its network
- * guard proxy). `loadTimeoutMs` and `idleWaitMs` (LOAD_TIMEOUT_MS, IDLE_WAIT_MS) bound the opening
- * of the page.
- *
- * @param {any} journey
- * @param {{ mode: string, baseUrl: string, headed?: boolean, launchOptions?: { args?: string[], [key: string]: any }, onStep?: ((step: any) => void) | null, loadTimeoutMs?: number, idleWaitMs?: number }} options
- */
-export async function runJourney(journey, { mode, baseUrl, headed = false, launchOptions = {}, onStep = null, loadTimeoutMs = LOAD_TIMEOUT_MS, idleWaitMs = IDLE_WAIT_MS }) {
-  const Driver = DRIVERS[mode];
-  if (!Driver) throw new Error(`Unknown mode "${mode}". Modes: ${Object.keys(DRIVERS).join(", ")}`);
-  const url = new URL(journey.start, baseUrl).href;
-  const result = {
+/** The result of a journey and mode before it runs (runJourney), or one that is not run (`skipped`). */
+function newResult(journey, Driver, mode, url) {
+  return {
     journey: journey.name,
     description: journey.description ?? "",
     file: journey.file,
@@ -248,6 +237,34 @@ export async function runJourney(journey, { mode, baseUrl, headed = false, launc
     pageErrors: [],
     toolErrors: [],
   };
+}
+
+/** The page a journey opens first, on `baseUrl`. */
+export const startUrl = (journey, baseUrl) => new URL(journey.start, baseUrl).href;
+
+/**
+ * The result of a journey and mode that is not run, and why (run-child.js: its page did not load
+ * in an earlier journey). It has every field a run one has, so it gets a report too.
+ */
+export function skippedResult(journey, { mode, baseUrl }, why) {
+  const Driver = DRIVERS[mode];
+  return { ...newResult(journey, Driver, mode, startUrl(journey, baseUrl)), status: "error", error: why };
+}
+
+/**
+ * Run one journey in one mode. `baseUrl` is the site under test, e.g. a pull request's preview.
+ * `launchOptions` go to Playwright's browser launch (the hosted server uses them for its network
+ * guard proxy). `loadTimeoutMs` and `idleWaitMs` (LOAD_TIMEOUT_MS, IDLE_WAIT_MS) bound the opening
+ * of the page.
+ *
+ * @param {any} journey
+ * @param {{ mode: string, baseUrl: string, headed?: boolean, launchOptions?: { args?: string[], [key: string]: any }, onStep?: ((step: any) => void) | null, loadTimeoutMs?: number, idleWaitMs?: number }} options
+ */
+export async function runJourney(journey, { mode, baseUrl, headed = false, launchOptions = {}, onStep = null, loadTimeoutMs = LOAD_TIMEOUT_MS, idleWaitMs = IDLE_WAIT_MS }) {
+  const Driver = DRIVERS[mode];
+  if (!Driver) throw new Error(`Unknown mode "${mode}". Modes: ${Object.keys(DRIVERS).join(", ")}`);
+  const url = startUrl(journey, baseUrl);
+  const result = newResult(journey, Driver, mode, url);
   // A real screen reader may need to run before the browser starts (Orca), so the driver exists
   // first and gets the page once it is open.
   const driver = new Driver(null);
@@ -282,7 +299,13 @@ export async function runJourney(journey, { mode, baseUrl, headed = false, launc
     // conversion request that never ends). If it does not come, the transcript says so: the page
     // may still have been fetching its content (R22.1-1). Only the wait's own timeout is
     // passed over; anything else (the page or browser closing) fails the journey here.
-    await page.goto(url, { waitUntil: "load", timeout: loadTimeoutMs });
+    try {
+      await page.goto(url, { waitUntil: "load", timeout: loadTimeoutMs });
+    } catch (error) {
+      // The page itself did not load: run-child.js runs no more journeys that open it (R22.2-2).
+      if (error instanceof errors.TimeoutError) result.notLoaded = true;
+      throw error;
+    }
     const quiet = await page.waitForLoadState("networkidle", { timeout: idleWaitMs }).then(
       () => true,
       (error) => {

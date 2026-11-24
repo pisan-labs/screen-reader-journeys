@@ -4,6 +4,7 @@ import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { loadJourney, runJourney } from "../src/journey.js";
 import { renderJourney, renderSummary } from "../src/report.js";
+import { renderJourneyHtml, renderSummaryHtml } from "../src/formats.js";
 import { serve } from "./server.js";
 
 const fixtures = fileURLToPath(new URL("./fixtures/", import.meta.url));
@@ -160,6 +161,10 @@ describe("opening the page", () => {
     assert.ok(renderJourney(result).includes(`- **Note:** ${still(0.3)}.`), renderJourney(result).slice(0, 600));
     const summary = renderSummary([result]);
     assert.ok(summary.includes(`- Late, walker: ${still(0.3)}.`), summary);
+    // And the HTML ones (R22.2-4).
+    assert.ok(renderJourneyHtml(result).includes(`<dt>Note</dt><dd>${still(0.3)}.</dd>`));
+    assert.ok(renderSummaryHtml([result]).includes(`<li>Late, walker: ${still(0.3)}.</li>`));
+    assert.equal(result.notLoaded, undefined, "the page did load");
   });
 
   it("fails where the page closes during the wait for quiet, not later (R22.1-3)", async () => {
@@ -168,6 +173,7 @@ describe("opening the page", () => {
     held = null;
     assert.equal(result.status, "error");
     assert.match(result.error, /^page\.waitForLoadState: /);
+    assert.equal(result.notLoaded, undefined, "it did load");
   });
 
   it("still gives up on a page whose load event never fires", async () => {
@@ -175,5 +181,6 @@ describe("opening the page", () => {
     const result = await runJourney(journey, { mode: "walker", baseUrl: base, loadTimeoutMs: 2000 });
     assert.equal(result.status, "error");
     assert.match(result.error, /page\.goto: Timeout 2000ms exceeded/);
+    assert.equal(result.notLoaded, true, "marked, so the run skips the others that open it (R22.2-2)");
   });
 });
