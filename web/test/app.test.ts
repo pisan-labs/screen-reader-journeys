@@ -344,7 +344,7 @@ describe('the dashboard', () => {
     const button = [...view().querySelectorAll('button')].find((b) => b.textContent?.startsWith('Download'))!;
     expect(button.textContent).toBe('Download the report for Home page: Tab order, Keyboard walker');
     expect(view().textContent).not.toMatch(/The server sleeps/);
-    expect(view().textContent).toMatch(/Files not kept.*too large, too many, or a name or type a report cannot have.*huge\.json.*And 2 more\./);
+    expect(view().textContent).toMatch(/Files not kept.*too large, too many, a name or type a report cannot have, or saving took too long.*huge\.json.*And 2 more\./);
     expect(view().textContent).toMatch(/Blocked requests.*10\.0\.0\.1:80/);
     expect(view().textContent).toMatch(/2 of 2.*1 error, 0 warnings/);
   });

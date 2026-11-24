@@ -33,6 +33,30 @@ export const MAX_REPORT_FILES = 200;
 /** At most this many left-out files are named in a run's summary; the rest are counted. */
 const SKIPPED_NAMED = 20;
 
+/**
+ * The database refuses a summary over 64 KiB (runs.summary's check, on jsonb's text, which adds
+ * a space after each comma and colon). A summary is kept to this many bytes of JSON, which
+ * leaves room for that. Names and blocked entries are cut first: they come from the run, and a
+ * control character in them takes six bytes.
+ */
+const SUMMARY_BYTES = 48 * 1024;
+const NAME_CHARS = 200;
+const BLOCKED_CHARS = 300;
+
+/** At most this many files left out one by one get a log line each; the rest are counted. */
+const LOGGED_EACH = 30;
+
+/**
+ * `text` cut to `max` characters in the middle, so its end (a file's extension, a refusal's
+ * reason) still shows.
+ */
+const cut = (text, max) => {
+  const chars = Array.from(text);
+  if (chars.length <= max) return text;
+  const tail = Math.floor((max - 1) / 4);
+  return `${chars.slice(0, max - 1 - tail).join("")}…${chars.slice(-tail).join("")}`;
+};
+
 /** A list of paths as the run user's child may answer it: relative, short, no "..", no NUL. */
 function pathList(value, what) {
   if (!Array.isArray(value) || value.length > 100000) throw new Error(`report child: ${what} is not a list of paths`);
@@ -66,13 +90,15 @@ const CONTENT_TYPES = {
   ".txt": "text/plain; charset=utf-8",
 };
 
+// Both cut by code point, never inside a surrogate pair: half of one is not valid in jsonb, and
+// the database would refuse the whole run's record.
 const short = (text, max = 500) => {
-  const line = String(text ?? "").split("\n")[0];
-  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+  const line = Array.from(String(text ?? "").split("\n")[0]);
+  return line.length > max ? `${line.slice(0, max - 1).join("")}…` : line.join("");
 };
 
 export function summarizeRun({ results, blocked, outcome }, files, skipped = []) {
-  return {
+  const summary = {
     results: results.length,
     passed: results.filter((r) => r.status === "pass").length,
     failed: results.filter((r) => r.status === "fail").length,
@@ -80,11 +106,19 @@ export function summarizeRun({ results, blocked, outcome }, files, skipped = [])
     errors: results.reduce((sum, r) => sum + r.errors, 0),
     warnings: results.reduce((sum, r) => sum + r.warnings, 0),
     files,
-    // Named up to a limit, so a run that wrote thousands of files still fits the summary's 64 KiB.
-    ...(skipped.length ? { skipped_files: skipped.slice(0, SKIPPED_NAMED), skipped_count: skipped.length } : {}),
-    blocked_requests: [...new Set(blocked)].slice(0, 50),
+    // Named up to a limit and counted in full, so a run that wrote thousands of files still fits.
+    ...(skipped.length ? { skipped_files: skipped.slice(0, SKIPPED_NAMED).map((name) => cut(name, NAME_CHARS)), skipped_count: skipped.length } : {}),
+    blocked_requests: [...new Set(blocked)].slice(0, 50).map((entry) => cut(entry, BLOCKED_CHARS)),
     timed_out: outcome === "timeout",
   };
+  // Then, until it fits: fewer named files (one stays, so the page still says why), fewer blocked
+  // entries. `files` alone fits: at most 200 names of at most 200 ASCII characters.
+  const size = () => Buffer.byteLength(JSON.stringify(summary));
+  const named = summary.skipped_files ?? [];
+  while (size() > SUMMARY_BYTES && named.length > 1) named.pop();
+  while (size() > SUMMARY_BYTES && summary.blocked_requests.length) summary.blocked_requests.pop();
+  while (size() > SUMMARY_BYTES && named.length) named.pop();
+  return summary;
 }
 
 /**
@@ -220,10 +254,15 @@ export function createWorker({
 
   async function saveReportsWith(access, runId, dir, { realRoot, uid }, overtime) {
     const saved = [];
+    // Files left out one by one, each for its own reason, come first in the summary; those left
+    // out together once the save was full or too long come after them.
     const skipped = [];
+    const inBulk = [];
+    let unlogged = 0;
     const leaveOut = (file, why) => {
       skipped.push(file);
-      log.log(`run ${runId}: left out ${file} (${why})`);
+      if (skipped.length <= LOGGED_EACH) log.log(`run ${runId}: left out ${cut(file, NAME_CHARS)} (${why})`);
+      else unlogged += 1;
     };
     // Once the run's reports are full, or the save has taken too long, every file still waiting
     // is left out without asking the child or the database, and logged once, not one by one.
@@ -244,7 +283,7 @@ export function createWorker({
       if (!full && saved.length >= MAX_REPORT_FILES) full = `the run keeps at most ${MAX_REPORT_FILES} report files`;
       if (!full && overtime()) full = `saving the reports took longer than ${Math.round(saveLimitMs / 1000)} s`;
       if (full) {
-        skipped.push(file);
+        inBulk.push(file);
         leftQuietly += 1;
         continue;
       }
@@ -271,9 +310,9 @@ export function createWorker({
       if (!kept) break; // the run was deleted
       saved.push(file);
     }
+    if (unlogged) log.log(`run ${runId}: left out ${unlogged} more files, each for one of the reasons above or another`);
     if (leftQuietly) log.log(`run ${runId}: left out ${leftQuietly} more files (${full})`);
-    skipped.sort();
-    return { saved, skipped };
+    return { saved, skipped: [...skipped.sort(), ...inBulk.sort()] };
   }
 
   async function recordResults(runId, results, files) {
