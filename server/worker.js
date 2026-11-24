@@ -7,7 +7,8 @@ import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 import { findJourney } from "./catalog.js";
 import { executeRun, probeSandbox as realProbeSandbox } from "./execute.js";
-import { resolveEgress } from "./hosts.js";
+import { BYTE_LIMIT_ENTRY } from "./egress-proxy.js";
+import { needsSandbox, resolveEgress } from "./hosts.js";
 import { clearFolders } from "./report-child.js";
 import { checkReportsFolder, listReportFiles, readReportFile, recordReportsFolder, startReportChild, stopUserProcesses, suidDumpableProblem } from "./reports.js";
 import { validateRunRequest } from "./validate.js";
@@ -50,6 +51,8 @@ const LOGGED_EACH = 30;
  * `text` cut to `max` characters in the middle, so its end (a file's extension, a refusal's
  * reason) still shows.
  */
+const isByteLimit = (entry) => typeof entry === "string" && entry.startsWith(BYTE_LIMIT_ENTRY);
+
 const cut = (text, max) => {
   const whole = String(text);
   if (whole.length <= 2 * max) {
@@ -122,7 +125,8 @@ export function summarizeRun({ results, blocked, outcome }, files, skipped = [])
     files,
     // Named up to a limit and counted in full, so a run that wrote thousands of files still fits.
     ...(skipped.length ? { skipped_files: skipped.slice(0, SKIPPED_NAMED).map((name) => cut(name, NAME_CHARS)), skipped_count: skipped.length } : {}),
-    blocked_requests: [...new Set(blocked)].slice(0, 50).map((entry) => cut(entry, BLOCKED_CHARS)),
+    // The byte limit's entry first, so neither the cap of 50 nor the size guard drops it.
+    blocked_requests: [...new Set([...blocked.filter(isByteLimit), ...blocked])].slice(0, 50).map((entry) => cut(entry, BLOCKED_CHARS)),
     timed_out: outcome === "timeout",
   };
   // Then, until it fits: fewer named files (one stays, so the page still says why), fewer blocked
@@ -150,7 +154,7 @@ export function summarizeRun({ results, blocked, outcome }, files, skipped = [])
  *   saveLimitMs?: number,
  *   now?: () => number,
  *   readSuidDumpable?: () => string,
- *   probeSandbox?: (runAs: { uid: number, gid: number } | null) => Promise<string | null>,
+ *   probeSandbox?: (runAs: { uid: number, gid: number } | null, options?: { signal?: AbortSignal }) => Promise<string | null>,
  * }} options
  */
 export function createWorker({
@@ -172,6 +176,7 @@ export function createWorker({
   let stopping = false;
   let loop = null;
   let current = null; // AbortController of the run in progress
+  const probing = new AbortController(); // ends the sandbox probe when the worker stops
   let wake = () => {};
 
   const failStaleRuns = () => db.failStaleRuns((config.runTimeoutMs + STALE_GRACE_MS) / 1000);
@@ -449,6 +454,8 @@ export function createWorker({
       // Check again: a user can insert a queued run straight into the table, past the API.
       const request = validateRunRequest(run, { catalog, rules: config.targetRules });
       if (!request.ok) return await finish(run, { status: "failed", error: `Refused: ${request.errors.map((e) => e.message).join(" ")}` });
+      // Never without the sandbox where it is needed, however the worker was started.
+      if (needsSandbox(config.targetRules) && !config.chromiumSandbox) return await finish(run, { status: "failed", error: `Refused: ${NEEDS_SANDBOX}.` });
       const target = new URL(request.value.base_url);
       const egress = await resolveEgress(target.hostname, Number(target.port || (target.protocol === "https:" ? 443 : 80)), config.targetRules, lookup);
       if (!egress.ok) return await finish(run, { status: "failed", error: `Refused: ${egress.reason}.` });
@@ -468,6 +475,7 @@ export function createWorker({
       };
       const runAs = config.runAs ? { ...config.runAs, home: dirs.home } : null;
       const outcome = await execute(job, { timeoutMs: config.runTimeoutMs, signal: current.signal, runAs, log });
+      if (outcome.blocked.some(isByteLimit)) log.log(`run ${run.id}: the network guard's byte limit closed its connections`);
       if (outcome.outcome === "aborted") {
         // The server is shutting down (a deploy, say): put the run back for the next instance.
         await db.requeue(run.id);
@@ -548,18 +556,20 @@ export function createWorker({
       };
     });
 
-  /** Why "*" may not be served here, or null. */
+  const NEEDS_SANDBOX = 'ALLOWED_TARGET_HOSTS with "*" or a wildcard rule needs Chromium\'s sandbox';
+
+  /** Why "*" or a wildcard may not be served here, or null. */
   async function sandboxProblem() {
-    const needs = 'ALLOWED_TARGET_HOSTS="*" needs Chromium\'s sandbox';
-    if (!config.chromiumSandbox) return `${needs}: set CHROMIUM_SANDBOX=true (docs/deploy.md, Security)`;
-    const reason = await probeSandbox(config.runAs);
+    if (!config.chromiumSandbox) return `${NEEDS_SANDBOX}: set CHROMIUM_SANDBOX=true (docs/deploy.md, Security)`;
+    const reason = await probeSandbox(config.runAs, { signal: probing.signal });
+    if (stopping) return null; // shutting down: not a reason to exit as a failure
     // The probe ran as the run's user: nothing of it may be left for the first run.
     try {
       if (config.runAs) await stopProcesses(config.runAs);
     } catch (error) {
       return `the sandbox probe's processes did not stop (${short(error.message, 300)})`;
     }
-    return reason ? `${needs}, which did not start here: ${short(reason, 300)}` : null;
+    return reason ? `${NEEDS_SANDBOX}, which did not start here: ${short(reason, 300)}` : null;
   }
 
   async function run() {
@@ -589,10 +599,11 @@ export function createWorker({
           return Promise.resolve();
         }
       }
-      // Under "*" any signed-in person may send the browser to any page, so a page that exploits
-      // Chromium must meet its sandbox, not only the network guard (R7.1): the worker starts only
-      // if a sandboxed Chromium starts here, as the run's user.
-      if (!loop && config.targetRules.some((rule) => rule.any)) {
+      // Under "*", or a wildcard anyone may host a page under, pages the operator does not choose
+      // reach the browser, so a page that exploits Chromium must meet its sandbox, not only the
+      // network guard (R7.1, R8.3): the worker starts only if a sandboxed Chromium starts here,
+      // as the run's user.
+      if (!loop && needsSandbox(config.targetRules)) {
         loop = (async () => {
           const problem = await sandboxProblem();
           if (problem) {
@@ -609,6 +620,7 @@ export function createWorker({
     /** Stop polling; a run in progress is stopped and put back in the queue. */
     async stop() {
       stopping = true;
+      probing.abort();
       current?.abort();
       wake();
       await loop;

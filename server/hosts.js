@@ -170,7 +170,15 @@ function whyNotPublic(url) {
   return `${url.host} is not a site this server may test.`;
 }
 
-const systemLookup = async (host) => (await dnsLookup(host, { all: true, order: "ipv4first" })).map((a) => a.address);
+/** The system's resolver, all addresses, IPv4 first. */
+export const systemLookup = async (host) => (await dnsLookup(host, { all: true, order: "ipv4first" })).map((a) => a.address);
+
+/**
+ * True when the rules let pages the operator does not choose into the browser: "*", or a
+ * wildcard, since anyone may host a page under a shared one (*.vercel.app). Then Chromium's
+ * sandbox is required (worker.js, run-child.js); exact hosts alone do not need it.
+ */
+export const needsSandbox = (rules) => rules.some((rule) => rule.any || rule.wildcard);
 
 /**
  * Decide whether the browser may open a connection to `host:port`, and to which address.

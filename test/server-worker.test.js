@@ -176,7 +176,8 @@ describe("worker, end to end", () => {
 
 describe("worker, with a fake run process", () => {
   const HOST = "good.vercel.app";
-  const config = configFor("*.vercel.app");
+  // A wildcard needs Chromium's sandbox (R8.3); these runs use a fake run process.
+  const config = configFor("*.vercel.app", { chromiumSandbox: true });
   const lookup = async () => ["76.76.21.21"];
   const executeNothing = () => {
     throw new Error("should not run");
@@ -207,7 +208,19 @@ describe("worker, with a fake run process", () => {
   });
 
   describe('with ALLOWED_TARGET_HOSTS="*", a run inserted straight into the table is checked again', () => {
-    const anyConfig = configFor("*");
+    const anyConfig = configFor("*", { chromiumSandbox: true });
+
+    it("refuses any run without Chromium's sandbox, however the worker was started (R8.2)", async () => {
+      for (const hosts of ["*", "*.vercel.app"]) {
+        const run = queued({ base_url: "https://example.vercel.app/", journeys: [BASIC] });
+        const fake = fakeSupabase({ runs: [run] });
+        let ran = false;
+        await createWorker({ db: dbOf(fake), catalog, config: configFor(hosts), execute: async () => ((ran = true), executeNothing()), lookup, log: quiet }).tick();
+        assert.equal(fake.run(run.id).status, "failed", hosts);
+        assert.match(fake.run(run.id).error, /Refused: ALLOWED_TARGET_HOSTS with "\*" or a wildcard rule needs Chromium's sandbox/);
+        assert.equal(ran, false);
+      }
+    });
     for (const [what, base, message] of [
       ["a private address", "http://10.0.0.1/", /Refused: 10\.0\.0\.1 is a private or reserved address/],
       ["the metadata address", "http://169.254.169.254/latest/", /Refused: 169\.254\.169\.254 is a private or reserved address/],
@@ -242,6 +255,7 @@ describe("worker, with a fake run process", () => {
       await createWorker({ db: dbOf(fake), catalog, config: anyConfig, execute: async (j) => ((job = j), executeNothing()), lookup, log: quiet }).tick();
       assert.equal(job.baseUrl, "https://example.org/");
       assert.equal(job.allowedTargetHosts, "*");
+      assert.equal(job.chromiumSandbox, true, "the run itself is launched sandboxed (R8.2)");
     });
   });
 
@@ -314,6 +328,16 @@ describe("worker, with a fake run process", () => {
     assert.ok(lines.every((m) => !m.includes("\n")), "no line holds a newline");
   });
 
+  it("logs one line when the network guard's byte limit closed a run's connections (R8.1)", async () => {
+    const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+    const fake = fakeSupabase({ runs: [run] });
+    const lines = [];
+    const execute = async () => ({ outcome: "done", error: null, results: [summary(BASIC, "walker")], blocked: ["all connections (byte limit: the run moved its 100 MB through the network guard)"] });
+    await createWorker({ db: dbOf(fake), catalog, config, execute, lookup, log: { log: (m) => lines.push(m), error: (m) => lines.push(m) } }).tick();
+    assert.equal(lines.filter((m) => m.endsWith(": the network guard's byte limit closed its connections")).length, 1);
+    assert.match(fake.run(run.id).summary.blocked_requests[0], /byte limit/);
+  });
+
   it("hands the run process only the checked job", async () => {
     const run = queued({ base_url: `https://${HOST}/x`, journeys: [BASIC, BASIC], modes: ["walker", "virtual"] });
     const fake = fakeSupabase({ runs: [run] });
@@ -368,7 +392,7 @@ describe("worker, with a fake run process", () => {
         started();
         signal.addEventListener("abort", () => resolve({ outcome: "aborted", error: null, results: [], blocked: [] }));
       });
-    const worker = createWorker({ db: dbOf(fake), catalog, config, execute, lookup, log: quiet });
+    const worker = createWorker({ db: dbOf(fake), catalog, config, execute, lookup, log: quiet, probeSandbox: async () => null, exit: () => {} });
     worker.start();
     await running;
     assert.equal(worker.busy, true);
@@ -787,7 +811,7 @@ describe("worker, with a fake run process", () => {
     });
 
     describe('with ALLOWED_TARGET_HOSTS="*", the worker starts only with a working sandbox (R7.1)', () => {
-      const start = async ({ sandbox, probe, stop = async () => {} }) => {
+      const start = async ({ sandbox, probe, stop = async () => {}, hosts = "*" }) => {
         const run = queued({ base_url: "https://example.org/", journeys: [BASIC] });
         const fake = fakeSupabase({ runs: [run] });
         const exits = [];
@@ -797,13 +821,13 @@ describe("worker, with a fake run process", () => {
         const worker = createWorker({
           db: dbOf(fake),
           catalog,
-          config: { ...own(), ...configFor("*", { runAs: own().runAs, chromiumSandbox: sandbox }) },
+          config: { ...own(), ...configFor(hosts, { runAs: own().runAs, chromiumSandbox: sandbox }) },
           execute: async () => ({ outcome: "done", error: null, results: [], blocked: [] }),
           lookup,
           log: { log() {}, error: (m) => errors.push(m) },
           stopProcesses: async (runAs) => (stopped.push(runAs), stop()),
           readSuidDumpable: () => "2",
-          probeSandbox: async (runAs) => (probed.push(runAs), probe?.()),
+          probeSandbox: async (runAs, options) => (probed.push(runAs), probe?.(options)),
           exit: (c) => exits.push(c),
         });
         const loop = worker.start();
@@ -815,7 +839,7 @@ describe("worker, with a fake run process", () => {
       it("refuses without CHROMIUM_SANDBOX=true, and does not probe", async () => {
         const { exits, errors, probed, status } = await start({ sandbox: false });
         assert.deepEqual(exits, [1]);
-        assert.ok(errors.some((m) => /not starting the worker: ALLOWED_TARGET_HOSTS="\*" needs Chromium's sandbox: set CHROMIUM_SANDBOX=true/.test(m)), errors.join("\n"));
+        assert.ok(errors.some((m) => /not starting the worker: ALLOWED_TARGET_HOSTS with "\*" or a wildcard rule needs Chromium's sandbox: set CHROMIUM_SANDBOX=true/.test(m)), errors.join("\n"));
         assert.deepEqual(probed, []);
         assert.equal(status, "queued", "no run was claimed");
       });
@@ -827,6 +851,23 @@ describe("worker, with a fake run process", () => {
         assert.equal(probed.length, 1);
         assert.equal(stopped.length, 1, "the probe's processes were stopped");
         assert.equal(status, "queued");
+      });
+
+      it("asks the same of a wildcard rule, which anyone may host a page under (R8.3)", async () => {
+        const { exits, errors, probed } = await start({ sandbox: false, hosts: "*.vercel.app" });
+        assert.deepEqual(exits, [1]);
+        assert.ok(errors.some((m) => /a wildcard rule needs Chromium's sandbox/.test(m)), errors.join("\n"));
+        assert.deepEqual(probed, []);
+        const exact = await start({ sandbox: false, hosts: "example.org" });
+        assert.deepEqual([exact.exits, exact.probed], [[], []], "exact hosts alone do not need it");
+      });
+
+      it("ends the probe when the worker stops, without exiting as a failure (R8.2)", { timeout: 10000 }, async () => {
+        let ended = false;
+        const probe = ({ signal }) => new Promise((resolve) => signal.addEventListener("abort", () => ((ended = true), resolve("the probe ended (SIGKILL)"))));
+        const { exits, errors } = await start({ sandbox: true, probe });
+        assert.equal(ended, true, "stop() ended the probe");
+        assert.deepEqual(exits, [], errors.join("\n"));
       });
 
       it("refuses when what the probe left cannot be stopped", async () => {
@@ -1000,7 +1041,7 @@ describe("worker, with a fake run process", () => {
       return { data: null, error: { message: "upstream unavailable" } };
     };
     const errors = [];
-    const worker = createWorker({ db: dbOf(fake), catalog, config, execute: executeNothing, lookup, log: { log() {}, error: (m) => errors.push(m) } });
+    const worker = createWorker({ db: dbOf(fake), catalog, config, execute: executeNothing, lookup, log: { log() {}, error: (m) => errors.push(m) }, probeSandbox: async () => null, exit: () => {} });
     worker.start();
     await new Promise((r) => setTimeout(r, 300));
     await worker.stop();
@@ -1022,6 +1063,14 @@ describe("a run's summary fits the database's 64 KiB check (R5.1)", () => {
     assert.equal(summary.skipped_files.length, 20);
     assert.ok(summary.skipped_files.every((name) => name.length <= 200));
     assert.ok(asJsonb(summary) <= 65536);
+  });
+
+  it("keeps the byte limit's entry first, past the cap of 50 and the size guard (R8.1)", () => {
+    const refusals = Array.from({ length: 60 }, (_, i) => `10.0.${i}.1:443 (private) ${"p".repeat(250)}`);
+    const limit = "all connections (byte limit: the run moved its 100 MB through the network guard)";
+    const files = Array.from({ length: 200 }, (_, i) => `${i}`.padEnd(200, "f"));
+    const summary = summarizeRun(outcome([...refusals, limit]), files, []);
+    assert.equal(summary.blocked_requests[0], limit);
   });
 
   it("cuts by code point, so no half of an emoji is left for jsonb to refuse", () => {
@@ -1118,11 +1167,80 @@ process.stdin.on("end", () => {
       ["an over-long line", `${JSON.stringify({ type: "error", message: "m".repeat(MAX_MESSAGE + 10) })}\n`],
       ["a line that keeps growing", "x".repeat(MAX_MESSAGE + 10)],
       ["a line that is not JSON", "{not json\n"],
+      ["a line of 300,000 characters, over the 256 KB limit (R8.4)", `${JSON.stringify({ type: "error", message: "m".repeat(300_000) })}\n`],
     ]) {
       const outcome = await probe([], { raw });
       assert.equal(outcome.outcome, "error", what);
       assert.equal(outcome.error, "The run process sent a malformed message.", what);
     }
+  });
+
+  /** Run `source` as the run process (it gets the job on stdin and writes JSON lines to fd 3). */
+  const runSource = async (source, options = {}) => {
+    const folder = await mkdtemp(join(tmpdir(), "srj-probe-"));
+    try {
+      const file = join(folder, "probe.mjs");
+      await writeFile(file, `import { createWriteStream } from "node:fs";\nimport { spawn } from "node:child_process";\nconst out = createWriteStream("", { fd: 3 });\nconst send = (m) => out.write(JSON.stringify(m) + "\\n");\nconst GOOD = ${JSON.stringify(good)};\n${source}\n`);
+      const lines = [];
+      const outcome = await executeRun(JOB, { timeoutMs: 10000, child: file, log: { log: (m) => lines.push(m), error: (m) => lines.push(m) }, ...options });
+      return Object.assign(outcome, { lines, folder });
+    } finally {
+      await rm(folder, { recursive: true, force: true });
+    }
+  };
+
+  it("keeps only the fields of a result that the worker uses (R8.4)", async () => {
+    const outcome = await probe([{ type: "result", result: { ...good, x: Array.from({ length: 1000 }, () => ({})) } }, { type: "done" }]);
+    assert.equal(outcome.outcome, "done");
+    assert.deepEqual(outcome.results, [good]);
+  });
+
+  it("stops reading once the process says it is done (R8.4)", async () => {
+    const outcome = await probe([], { raw: `${JSON.stringify({ type: "done" })}\n{not json\n${"x".repeat(MAX_MESSAGE + 10)}` });
+    assert.deepEqual([outcome.outcome, outcome.error], ["done", null], "what came after done was never parsed");
+  });
+
+  it("still takes a result already on its way when the time is up, until the process ends (R8.5)", async () => {
+    const outcome = await runSource('process.on("SIGTERM", () => out.end(JSON.stringify({ type: "result", result: GOOD }) + "\\n", () => process.exit(0)));\nprocess.stdin.resume();\nsetInterval(() => {}, 1000);', { timeoutMs: 200 });
+    assert.equal(outcome.outcome, "timeout");
+    assert.deepEqual(outcome.results, [good]);
+  });
+
+  it("kills a process that ignores SIGTERM (R8.5)", { timeout: 10000 }, async () => {
+    const outcome = await runSource('process.on("SIGTERM", () => {});\nprocess.stdin.resume();\nsetInterval(() => {}, 1000);', { timeoutMs: 200, killAfterMs: 200 });
+    assert.equal(outcome.outcome, "timeout");
+  });
+
+  it("settles a moment after the process exits, even if something it started holds its pipes (R8.5)", { timeout: 10000 }, async () => {
+    const pidFile = join(tmpdir(), `srj-grandchild-${process.pid}-${Date.now()}`);
+    try {
+      const outcome = await runSource(
+        `const g = spawn(process.execPath, ["-e", "setTimeout(() => {}, 20000)"], { detached: true, stdio: ["ignore", "inherit", "inherit", "inherit"] });\ng.unref();\n(await import("node:fs")).writeFileSync(${JSON.stringify(pidFile)}, String(g.pid));\nprocess.stdin.resume();\nprocess.stdin.on("end", () => out.write(JSON.stringify({ type: "done" }) + "\\n", () => process.exit(0)));`
+      );
+      assert.equal(outcome.outcome, "done");
+    } finally {
+      const { readFileSync: read, rmSync } = await import("node:fs");
+      try {
+        process.kill(Number(read(pidFile, "utf8")), "SIGKILL");
+      } catch {
+        // already gone
+      }
+      rmSync(pidFile, { force: true });
+    }
+  });
+
+  it("takes a large last message written just before the process exits (R8.5)", async () => {
+    const outcome = await runSource('process.stdin.resume();\nprocess.stdin.on("end", () => { send({ type: "result", result: { ...GOOD, error: "e".repeat(90_000) } }); out.end(JSON.stringify({ type: "done" }) + "\\n", () => process.exit(0)); });');
+    assert.equal(outcome.outcome, "done");
+    assert.equal(outcome.results.length, 1);
+    assert.equal(outcome.results[0].error.length, 90_000);
+  });
+
+  it("allows 1000 log lines a run, stdout and stderr together (R8.6)", async () => {
+    const outcome = await runSource('for (let i = 0; i < 600; i++) { process.stdout.write("o\\n"); process.stderr.write("e\\n"); }\nprocess.stdin.resume();\nprocess.stdin.on("end", () => out.end(JSON.stringify({ type: "done" }) + "\\n", () => setTimeout(() => process.exit(0), 50)));');
+    const relayed = outcome.lines.filter((m) => m.startsWith("run process:"));
+    assert.equal(relayed.length, 1001);
+    assert.equal(relayed.filter((m) => /more than 1000 lines/.test(m)).length, 1);
   });
 
   it("takes one result for each journey and mode, and none twice (R7.5)", async () => {
@@ -1169,6 +1287,15 @@ process.stdin.on("end", () => {
     assert.deepEqual(summary.skipped_files, ["\uFFFD.md", "a\uFFFDb.md"]);
     const long = summarizeRun({ results: [], blocked: ["z".repeat(10_000_000)], outcome: "done" }, [], []);
     assert.equal(Array.from(long.blocked_requests[0]).length, 300, "a huge entry is cut from a bounded slice");
+  });
+});
+
+describe("run-child.js, with \"*\" or a wildcard (R8.2)", () => {
+  it("refuses a job without Chromium's sandbox, before starting anything", async () => {
+    const { runJob } = await import("../server/run-child.js");
+    for (const hosts of ["*", "*.vercel.app"]) {
+      await assert.rejects(runJob({ allowedTargetHosts: hosts, chromiumSandbox: false, journeys: [], modes: [] }, () => {}), /needs Chromium's sandbox/, hosts);
+    }
   });
 });
 

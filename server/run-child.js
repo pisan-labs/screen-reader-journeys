@@ -8,7 +8,7 @@ import { pathToFileURL } from "node:url";
 import { loadJourney, runJourney } from "../src/journey.js";
 import { slug, writeReports } from "../src/report.js";
 import { startEgressProxy } from "./egress-proxy.js";
-import { parseAllowedHosts } from "./hosts.js";
+import { needsSandbox, parseAllowedHosts } from "./hosts.js";
 
 /** The numbers the database keeps for one journey in one mode. */
 export function summarizeResult(result, path) {
@@ -36,7 +36,10 @@ export function summarizeResult(result, path) {
  * @param {{ lookup?: (host: string) => Promise<string[]> }} [options]
  */
 export async function runJob(job, send, { lookup } = {}) {
-  const proxy = await startEgressProxy({ rules: parseAllowedHosts(job.allowedTargetHosts), lookup });
+  const rules = parseAllowedHosts(job.allowedTargetHosts);
+  // As in the worker: with "*" or a wildcard, never a browser without its sandbox.
+  if (needsSandbox(rules) && !job.chromiumSandbox) throw new Error('ALLOWED_TARGET_HOSTS with "*" or a wildcard rule needs Chromium\'s sandbox');
+  const proxy = await startEgressProxy({ rules, lookup });
   const launchOptions = {
     proxy: { server: proxy.server },
     chromiumSandbox: !!job.chromiumSandbox,

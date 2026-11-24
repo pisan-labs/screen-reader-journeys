@@ -39,15 +39,15 @@ const blockedOf = (list) => (Array.isArray(list) && list.length <= 1000 && list.
 /**
  * Relay a run process's output to the log one line at a time: each line quoted (so it cannot pass
  * for a line of the server's own), cut to `maxLine` characters, and at most `maxLines` lines.
+ * Streams that share one `budget` (stdout and stderr of one run) share the `maxLines`.
  */
-export function relayOutput(stream, write, { maxLine = 2000, maxLines = 1000 } = {}) {
+export function relayOutput(stream, write, { maxLine = 2000, maxLines = 1000, budget = { lines: 0 } } = {}) {
   let line = "";
   let cutShort = false;
-  let lines = 0;
   const emit = () => {
-    if (lines < maxLines) write(`run process: ${JSON.stringify(line.toWellFormed())}${cutShort ? " (cut)" : ""}`);
-    else if (lines === maxLines) write(`run process: more than ${maxLines} lines; the rest is not logged`);
-    lines += 1;
+    if (budget.lines < maxLines) write(`run process: ${JSON.stringify(line.toWellFormed())}${cutShort ? " (cut)" : ""}`);
+    else if (budget.lines === maxLines) write(`run process: more than ${maxLines} lines; the rest is not logged`);
+    budget.lines += 1;
     line = "";
     cutShort = false;
   };
@@ -75,10 +75,11 @@ export function relayOutput(stream, write, { maxLine = 2000, maxLines = 1000 } =
  * worked, or to the reason it did not; never rejects. Ended after `timeoutMs`.
  *
  * @param {{ uid: number, gid: number } | null} runAs
- * @param {{ timeoutMs?: number, program?: string }} [options]
+ * @param {{ timeoutMs?: number, program?: string, signal?: AbortSignal }} [options] `signal` ends
+ *   the probe (the worker stopping)
  * @returns {Promise<string | null>}
  */
-export function probeSandbox(runAs, { timeoutMs = 60000, program = PROBE } = {}) {
+export function probeSandbox(runAs, { timeoutMs = 60000, program = PROBE, signal } = {}) {
   return new Promise((resolve) => {
     const child = fork(program, [], {
       execArgv: [],
@@ -92,33 +93,41 @@ export function probeSandbox(runAs, { timeoutMs = 60000, program = PROBE } = {})
       if (said.length < 1000) said += chunk;
     });
     const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+    const end = () => child.kill("SIGKILL");
+    if (signal?.aborted) end();
+    else signal?.addEventListener("abort", end, { once: true });
     child.on("error", (error) => {
       clearTimeout(timer);
       resolve(`the probe could not start (${error.message})`);
     });
-    child.on("exit", (code, signal) => {
+    child.on("exit", (code, killedBy) => {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", end);
       if (code === 0) return resolve(null);
-      resolve(said.trim().split("\n")[0] || `the probe ended (${signal ?? `exit code ${code}`})`);
+      resolve(said.trim().split("\n")[0] || `the probe ended (${killedBy ?? `exit code ${code}`})`);
     });
   });
 }
 
 /** The longest message a run process may send, in characters; a longer one is malformed. */
-export const MAX_MESSAGE = 1024 * 1024;
+export const MAX_MESSAGE = 256 * 1024;
 
 /**
  * Read a run process's messages from `stream`: one JSON value per line. A line longer than `max`
  * (or one still growing past it), or one that is not JSON, calls `onBad` once and ends the
- * reading, so a process cannot make the server hold more than about `max` of its output.
+ * reading, so a process cannot make the server hold more than about `max` of its output. Returns
+ * `stop()`, which ends the reading without blame (after the process says it is done).
  */
 export function readMessages(stream, onMessage, onBad, max = MAX_MESSAGE) {
   let pending = "";
   let bad = false;
-  const fail = () => {
+  const stop = () => {
     bad = true;
     pending = "";
     stream.destroy();
+  };
+  const fail = () => {
+    stop();
     onBad();
   };
   stream.setEncoding("utf8");
@@ -141,6 +150,7 @@ export function readMessages(stream, onMessage, onBad, max = MAX_MESSAGE) {
     }
     if (pending.length > max) fail();
   });
+  return stop;
 }
 
 export function childEnv(env = process.env, overrides = {}) {
@@ -151,7 +161,8 @@ export function childEnv(env = process.env, overrides = {}) {
 /**
  * Run `job` (see run-child.js) in a child process. Resolves, never rejects, with
  * `{ outcome: "done" | "timeout" | "aborted" | "error", error, results, blocked }`, where
- * `results` holds every journey and mode that finished, even after a timeout.
+ * `results` holds every journey and mode that finished, even after a timeout: results already on
+ * their way when it passes are still taken, until the process has ended.
  *
  * `runAs: { uid, gid, home }` starts the process as that user, so that a page that breaks out of
  * the browser cannot read this server's environment (its Supabase keys) through /proc. This
@@ -180,14 +191,21 @@ export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs =
       ...(runAs ? { uid: runAs.uid, gid: runAs.gid } : {}),
     });
 
-    if (child.stdout) relayOutput(child.stdout, (line) => log.log(line));
-    if (child.stderr) relayOutput(child.stderr, (line) => log.error(line));
+    // One budget of log lines for stdout and stderr together.
+    const budget = { lines: 0 };
+    if (child.stdout) relayOutput(child.stdout, (line) => log.log(line), { budget });
+    if (child.stderr) relayOutput(child.stderr, (line) => log.error(line), { budget });
 
-    // Once the run is stopped, or the process has said it is done, failed or sent something it
-    // should not, nothing more it sends is taken.
+    // Once the process has said it is done or failed, or sent something it should not, nothing
+    // more it sends is taken, or read. After a timeout or an abort, results already on their way
+    // are still taken (each once, for the job's own journeys and modes) until it has ended.
     let closed = false;
-    const stop = (why) => {
+    let stopReading = () => {};
+    const close = () => {
       closed = true;
+      stopReading();
+    };
+    const stop = (why) => {
       outcome ??= why;
       child.kill("SIGTERM");
       setTimeout(() => child.kill("SIGKILL"), killAfterMs).unref();
@@ -207,6 +225,7 @@ export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs =
 
     const malformed = () => {
       error ??= "The run process sent a malformed message.";
+      close();
       stop("error");
     };
     // One result for each journey and mode of the job, and no other.
@@ -220,14 +239,16 @@ export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs =
         const key = `${message.result.journey}\n${message.result.mode}`;
         if (!expected.has(key) || taken.has(key)) return malformed();
         taken.add(key);
-        results.push(message.result);
+        // Only the fields the worker uses: anything else the process added is not kept.
+        const r = message.result;
+        results.push({ journey: r.journey, name: r.name, mode: r.mode, status: r.status, error: r.error, checks_total: r.checks_total, checks_passed: r.checks_passed, errors: r.errors, warnings: r.warnings, report_base: r.report_base });
         blocked.push(...refused);
       } else if (message?.type === "done") {
-        closed = true;
+        close();
         outcome ??= "done";
       } else if (message?.type === "error") {
         if (typeof message.message !== "string") return malformed();
-        closed = true;
+        close();
         outcome ??= "error";
         error ??= message.message.slice(0, 100_000);
       } else {
@@ -235,7 +256,7 @@ export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs =
       }
     };
     const messages = /** @type {import("node:stream").Readable} */ (child.stdio[3]);
-    if (messages) readMessages(messages, onMessage, malformed);
+    if (messages) stopReading = readMessages(messages, onMessage, malformed);
     child.on("error", (spawnError) => {
       outcome ??= "error";
       error ??= `Could not start the run process: ${spawnError.message}`;

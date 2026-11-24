@@ -498,7 +498,24 @@ describe("the egress proxy connects to the checked address, and limits a run's b
   let echo;
   before(async () => {
     site = await new Promise((done) => {
-      const server = createServer((req, res) => res.end(req.url === "/big" ? "x".repeat(5000) : "small"));
+      const server = createServer(async (req, res) => {
+        if (req.url === "/stream") {
+          // 60 chunks of 1000 bytes, 10 ms apart: long enough for the limit to cut it.
+          res.writeHead(200);
+          for (let i = 0; i < 60 && !res.destroyed; i++) {
+            res.write("x".repeat(1000));
+            await new Promise((r) => setTimeout(r, 10));
+          }
+          return res.end();
+        }
+        if (req.url === "/headers") return res.writeHead(204, { "x-big": "h".repeat(14_000) }).end();
+        if (req.url === "/upload") {
+          let got = 0;
+          req.on("data", (c) => (got += c.length));
+          return req.on("end", () => res.end(String(got)));
+        }
+        res.end("small");
+      });
       server.listen(0, "127.0.0.1", () => done(server));
     });
     echo = await new Promise((done) => {
@@ -554,15 +571,18 @@ describe("the egress proxy connects to the checked address, and limits a run's b
     }
   });
 
+  const limitEntry = (proxy) => proxy.blocked[0] ?? "";
+  const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+
   it("closes everything, and refuses new connections, once a run has moved its limit", async () => {
     const proxy = await startEgressProxy({ rules: parseAllowedHosts(`127.0.0.1:${site.address().port}, 127.0.0.1:${echo.address().port}`), maxBytes: 3000 });
     try {
       assert.deepEqual(await call(proxy, `http://127.0.0.1:${site.address().port}/`), { status: 200, body: "small" });
-      const big = await call(proxy, `http://127.0.0.1:${site.address().port}/big`);
-      assert.ok(big.body.length < 5000, `cut short at the limit (${big.body.length} bytes arrived)`);
-      assert.equal((await call(proxy, `http://127.0.0.1:${site.address().port}/`)).status, 403, "nothing more once full");
-      assert.equal((await tunnel(proxy, `127.0.0.1:${echo.address().port}`)).status, 403);
-      assert.ok(proxy.blocked.some((b) => /byte limit: the run moved its/.test(b)), proxy.blocked.join("\n"));
+      const stream = await call(proxy, `http://127.0.0.1:${site.address().port}/stream`);
+      assert.ok(stream.body.length < 60_000, `cut short at the limit (${stream.body.length} bytes arrived)`);
+      assert.equal((await call(proxy, `http://127.0.0.1:${site.address().port}/`)).status, 0, "nothing more once full: the connection is refused");
+      assert.equal((await tunnel(proxy, `127.0.0.1:${echo.address().port}`)).status, 0);
+      assert.match(limitEntry(proxy), /^all connections \(byte limit: the run moved its/);
     } finally {
       await proxy.close();
     }
@@ -571,10 +591,118 @@ describe("the egress proxy connects to the checked address, and limits a run's b
   it("counts a tunnel's bytes, both ways", async () => {
     const proxy = await startEgressProxy({ rules: parseAllowedHosts(`127.0.0.1:${echo.address().port}`), maxBytes: 3000 });
     try {
-      const { status, back } = await tunnel(proxy, `127.0.0.1:${echo.address().port}`, "y".repeat(2000));
-      assert.equal(status, 200);
-      assert.ok(back < 2000, `the echo was cut at the limit (${back} bytes came back)`);
-      assert.ok(proxy.blocked.some((b) => /byte limit: the run moved its/.test(b)));
+      const outcome = await new Promise((resolve) => {
+        const req = request({ host: "127.0.0.1", port: Number(new URL(proxy.server).port), method: "CONNECT", path: `127.0.0.1:${echo.address().port}` });
+        req.on("connect", async (res, socket) => {
+          let back = 0;
+          socket.on("data", (c) => (back += c.length));
+          socket.on("close", () => resolve({ status: res.statusCode, back }));
+          socket.on("error", () => {});
+          for (let i = 0; i < 30 && !socket.destroyed; i++) {
+            socket.write("y".repeat(200));
+            await pause(10);
+          }
+          socket.end();
+        });
+        req.end();
+      });
+      assert.equal(outcome.status, 200);
+      assert.ok(outcome.back < 6000, `the echo was cut at the limit (${outcome.back} bytes came back)`);
+      assert.match(limitEntry(proxy), /byte limit/);
+    } finally {
+      await proxy.close();
+    }
+  });
+
+  it("counts headers, so a loop of header-only requests reaches the limit too (R8.1)", async () => {
+    const proxy = await startEgressProxy({ rules: parseAllowedHosts(`127.0.0.1:${site.address().port}`), maxBytes: 100_000 });
+    try {
+      let passed = 0;
+      for (let i = 0; i < 40; i++) {
+        const res = await new Promise((resolve) => {
+          const req = request(
+            { host: "127.0.0.1", port: Number(new URL(proxy.server).port), path: `http://127.0.0.1:${site.address().port}/headers`, headers: { "x-big": "r".repeat(13_000) } },
+            (r) => (r.resume(), r.on("end", () => resolve(r.statusCode)))
+          );
+          req.on("error", () => resolve(0));
+          req.end();
+        });
+        if (res === 204) passed += 1;
+        await pause(5);
+      }
+      // Each round trip moves about 27 KB of headers: the limit stops the loop after a few.
+      assert.ok(passed > 0 && passed < 10, `${passed} of 40 passed`);
+      assert.match(limitEntry(proxy), /byte limit/);
+    } finally {
+      await proxy.close();
+    }
+  });
+
+  it("counts a plain-http upload (R8.1)", async () => {
+    const proxy = await startEgressProxy({ rules: parseAllowedHosts(`127.0.0.1:${site.address().port}`), maxBytes: 50_000 });
+    try {
+      const answer = await new Promise((resolve) => {
+        const req = request({ host: "127.0.0.1", port: Number(new URL(proxy.server).port), method: "POST", path: `http://127.0.0.1:${site.address().port}/upload` }, (r) => {
+          let body = "";
+          r.on("data", (c) => (body += c));
+          r.on("end", () => resolve(body));
+          r.on("error", () => resolve("cut"));
+        });
+        req.on("error", () => resolve("cut"));
+        (async () => {
+          for (let i = 0; i < 20 && !req.destroyed; i++) {
+            req.write("u".repeat(20_000));
+            await pause(10);
+          }
+          req.end();
+        })();
+      });
+      assert.notEqual(answer, "400000", "the upload did not go through whole");
+      assert.match(limitEntry(proxy), /byte limit/);
+    } finally {
+      await proxy.close();
+    }
+  });
+
+  it("counts the bytes sent with a CONNECT before the tunnel is up (R8.1)", async () => {
+    const proxy = await startEgressProxy({ rules: parseAllowedHosts(`127.0.0.1:${echo.address().port}`), maxBytes: 5000 });
+    try {
+      await new Promise((resolve) => {
+        const socket = net.connect(Number(new URL(proxy.server).port), "127.0.0.1", () => {
+          socket.write(`CONNECT 127.0.0.1:${echo.address().port} HTTP/1.1\r\n\r\n${"z".repeat(20_000)}`);
+        });
+        socket.on("data", () => {});
+        socket.on("error", () => {});
+        socket.on("close", resolve);
+        setTimeout(() => socket.destroy(), 1000);
+      });
+      assert.match(limitEntry(proxy), /byte limit/);
+    } finally {
+      await proxy.close();
+    }
+  });
+
+  it("keeps the limit's entry first, even after 50 refusals (R8.1)", async () => {
+    // Refusals move bytes too (about 100 each), so the limit here leaves room for 55 of them.
+    const proxy = await startEgressProxy({ rules: parseAllowedHosts(`127.0.0.1:${site.address().port}`), maxBytes: 20_000 });
+    try {
+      for (let i = 0; i < 55; i++) await tunnel(proxy, `10.0.${i}.1:443`);
+      assert.equal(proxy.blocked.length, 50);
+      await call(proxy, `http://127.0.0.1:${site.address().port}/stream`);
+      assert.match(limitEntry(proxy), /byte limit/);
+      assert.equal(proxy.blocked.length, 51);
+    } finally {
+      await proxy.close();
+    }
+  });
+
+  it("looks up each host name once, and at most so many a run (R8.1)", async () => {
+    const asked = [];
+    const proxy = await startEgressProxy({ rules: parseAllowedHosts("*"), maxNames: 3, lookup: async (host) => (asked.push(host), ["10.9.9.9"]) });
+    try {
+      for (const host of ["a.example", "b.example", "a.example", "c.example", "d.example"]) await tunnel(proxy, `${host}:443`);
+      assert.deepEqual(asked, ["a.example", "b.example", "c.example"], "a.example once; d.example not at all");
+      assert.ok(proxy.blocked.some((b) => b.startsWith("d.example:443 ") && /more than 3 host names in this run/.test(b)), proxy.blocked.join("\n"));
     } finally {
       await proxy.close();
     }
