@@ -31,18 +31,31 @@ export function summarizeResult(result, path) {
 export const PROGRESS_EVERY_MS = 1000;
 
 /**
+ * Send the proxy's refusals not yet sent with a result, if any: at the end of a job (the byte
+ * limit can trip as the proxy closes), and when the run is stopped (R9.3), so the run's summary
+ * always carries them, the byte limit's entry first.
+ */
+export function sendLeftover(proxy, send) {
+  const left = proxy?.blocked.splice(0) ?? [];
+  if (left.length) send({ type: "blocked", blocked: left });
+}
+
+/**
  * job: { baseUrl, journeys: [{ path, file }], modes, outDir, allowedTargetHosts, chromiumSandbox }
- * send(message): receives { type: "result", result, blocked } after each journey and mode.
+ * send(message): receives { type: "result", result, blocked } after each journey and mode, and
+ * { type: "blocked", blocked } with any refusals left at the end.
  *
  * @param {any} job
  * @param {(message: object) => void} send
- * @param {{ lookup?: (host: string) => Promise<string[]> }} [options]
+ * @param {{ lookup?: (host: string) => Promise<string[]>, startProxy?: typeof startEgressProxy, onProxy?: (proxy: any) => void }} [options]
+ *   `startProxy` (the tests' own), `onProxy` (told of the proxy, so a stop can send what is left)
  */
-export async function runJob(job, send, { lookup } = {}) {
+export async function runJob(job, send, { lookup, startProxy = startEgressProxy, onProxy = () => {} } = {}) {
   const rules = parseAllowedHosts(job.allowedTargetHosts);
   // As in the worker: with "*" or a wildcard, never a browser without its sandbox.
   if (needsSandbox(rules) && !job.chromiumSandbox) throw new Error('ALLOWED_TARGET_HOSTS with "*" or a wildcard rule needs Chromium\'s sandbox');
-  const proxy = await startEgressProxy({ rules, lookup });
+  const proxy = await startProxy({ rules, lookup });
+  onProxy(proxy);
   const launchOptions = {
     proxy: { server: proxy.server },
     chromiumSandbox: !!job.chromiumSandbox,
@@ -70,25 +83,62 @@ export async function runJob(job, send, { lookup } = {}) {
     }
   } finally {
     await proxy.close();
+    sendLeftover(proxy, send);
   }
 }
 
+/**
+ * Sends each message as one JSON line on `out`, and nothing once `out` has ended: a SIGTERM may
+ * come after the last message has gone.
+ *
+ * @param {{ writableEnded: boolean, write: (line: string) => unknown }} out
+ */
+export function sender(out) {
+  return (/** @type {object} */ message) => {
+    if (!out.writableEnded) out.write(`${JSON.stringify(message)}\n`);
+  };
+}
+
+/**
+ * At a stop (SIGTERM). Playwright closes its browsers but leaves the process running, so this
+ * sends the refusals the run's summary should carry, then exits (R9.3): those left now, and
+ * `waitMs` later those made since (the byte limit can trip on the proxy's tick, or at its close)
+ * if the job's own end has not sent them by then (R20.1-3). It exits once they are written, or
+ * 500 ms after that.
+ *
+ * @param {() => { blocked: string[] } | null} proxy
+ * @param {(message: object) => void} send
+ * @param {{ writableEnded: boolean, end: (done: () => void) => unknown }} out
+ * @param {(code: number) => void} exit
+ */
+export function stopSoon(proxy, send, out, exit, waitMs = 1500) {
+  sendLeftover(proxy(), send);
+  setTimeout(() => {
+    sendLeftover(proxy(), send);
+    if (!out.writableEnded) out.end(() => exit(143));
+    setTimeout(() => exit(143), 500).unref();
+  }, waitMs).unref();
+}
+
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
-  // Playwright closes its browsers on SIGTERM but leaves the process running; exit soon after.
-  process.on("SIGTERM", () => setTimeout(() => process.exit(143), 1500).unref());
   // The job comes on stdin; messages go to fd 3, one JSON line each (execute.js, readMessages).
   const out = createWriteStream("", { fd: 3 });
-  const send = (message) => out.write(`${JSON.stringify(message)}\n`);
+  // A server that has stopped reading is no reason to crash before exiting.
+  out.on("error", () => {});
+  const send = sender(out);
+  let proxy = null;
+  process.on("SIGTERM", () => stopSoon(() => proxy, send, out, (code) => process.exit(code)));
   let input = "";
   process.stdin.setEncoding("utf8");
   process.stdin.on("data", (chunk) => (input += chunk));
   process.stdin.on("end", async () => {
     let last = { type: "done" };
     try {
-      await runJob(JSON.parse(input), send);
+      await runJob(JSON.parse(input), send, { onProxy: (p) => (proxy = p) });
     } catch (error) {
       last = { type: "error", message: String(error?.message ?? error).split("\n")[0].slice(0, 100_000) };
     }
+    if (out.writableEnded) return;
     out.end(`${JSON.stringify(last)}\n`, () => process.exit(0));
   });
 }
