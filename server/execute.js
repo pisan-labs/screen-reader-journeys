@@ -3,6 +3,7 @@
 import { fork, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { BYTE_LIMIT_ENTRY } from "./egress-proxy.js";
 
 const CHILD = fileURLToPath(new URL("./run-child.js", import.meta.url));
 const PROBE = fileURLToPath(new URL("./sandbox-probe.js", import.meta.url));
@@ -34,6 +35,12 @@ export function isResult(r) {
   );
 }
 /** The proxy's refusals: strings, "host:port (reason)", each cut here to a bounded length. */
+/**
+ * The most different refusals kept for one run, however many the run process sends: the summary
+ * shows 50. One byte-limit entry is kept besides, so that the others never crowd it out.
+ */
+export const MAX_BLOCKED = 200;
+
 const blockedOf = (list) => (Array.isArray(list) && list.length <= 1000 && list.every((s) => typeof s === "string") ? list.map((s) => s.slice(0, 2000)) : null);
 
 /**
@@ -115,7 +122,8 @@ export const MAX_MESSAGE = 256 * 1024;
 /**
  * Read a run process's messages from `stream`: one JSON value per line. A line longer than `max`
  * (or one still growing past it), or one that is not JSON, calls `onBad` once and ends the
- * reading, so a process cannot make the server hold more than about `max` of its output. Returns
+ * reading, so no one message makes the server hold more than about `max` of its output (what it
+ * keeps from many is bounded by executeRun: one result per journey and mode, MAX_BLOCKED). Returns
  * `stop()`, which ends the reading without blame (after the process says it is done).
  */
 export function readMessages(stream, onMessage, onBad, max = MAX_MESSAGE) {
@@ -178,6 +186,22 @@ export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs =
   return new Promise((resolve) => {
     const results = [];
     const blocked = [];
+    // Each refusal once, at most MAX_BLOCKED of them and one byte-limit entry (R20.1-1).
+    const seen = new Set();
+    let byteLimit = false;
+    const keep = (/** @type {string[]} */ refused) => {
+      for (const entry of refused) {
+        if (entry.startsWith(BYTE_LIMIT_ENTRY)) {
+          if (byteLimit) continue;
+          byteLimit = true;
+        } else if (seen.size >= MAX_BLOCKED || seen.has(entry)) {
+          continue;
+        } else {
+          seen.add(entry);
+        }
+        blocked.push(entry);
+      }
+    };
     let outcome = null;
     let error = null;
     let settled = false;
@@ -242,12 +266,12 @@ export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs =
         // Only the fields the worker uses: anything else the process added is not kept.
         const r = message.result;
         results.push({ journey: r.journey, name: r.name, mode: r.mode, status: r.status, error: r.error, checks_total: r.checks_total, checks_passed: r.checks_passed, errors: r.errors, warnings: r.warnings, report_base: r.report_base });
-        blocked.push(...refused);
+        keep(refused);
       } else if (message?.type === "blocked") {
         // The proxy's refusals left at the end of a job or at a stop (run-child.js, sendLeftover).
         const refused = blockedOf(message.blocked);
         if (!refused) return malformed();
-        blocked.push(...refused);
+        keep(refused);
       } else if (message?.type === "done") {
         close();
         outcome ??= "done";

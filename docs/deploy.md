@@ -308,8 +308,10 @@ where you can.
     the browser's own connections to it (request lines, headers, bodies, uploads and tunnels
     alike; checked every 50 ms, so a run may pass it by what moves in that time). Then every
     connection is closed and new ones are refused; the run's blocked requests say so first, also
-    when the run ends early (a timeout, a stop, or a journey that fails), and the server logs one
-    line. A run may also look up at most 500 host names, each once.
+    when the run ends early (a timeout, or a journey that fails), and the server logs one line.
+    A run stopped because the server is shutting down (a deploy) is put back in the queue and
+    starts again, so its summary is the new run's. A run may also look up at most 500 host names,
+    each once. Its blocked requests keep at most 200 different entries, plus the byte limit's.
   - Per run: one result for each of the run's journeys and modes (a unique constraint), and at
     most 200 report files and 20 MiB of reports, of at most 2 MiB each.
   - A file is left out if it is a link or another non-file, is over 2 MiB, has a name the
@@ -410,8 +412,9 @@ where you can.
     after it is done or has failed, or after something malformed (which ends the run as an
     error). Results already on their way when its time is up are still taken until it has
     ended. It has no IPC channel: the job goes in on stdin, and its messages come back on a
-    pipe, one JSON line each, at most 256 KB a line, so it cannot make the server hold more than
-    that at once, plus at most one small result for each journey and mode. Its own output
+    pipe, one JSON line each, at most 262,144 characters a line, so it cannot make the server
+    hold more than that at once, plus at most one small result for each journey and mode and
+    200 different refusals of at most 2000 characters (and the byte limit's). Its own output
     reaches the log quoted, one line at a time, at most 2000 characters a line and 1000 lines a
     run, stdout and stderr together.
 - **Chromium's sandbox** (`CHROMIUM_SANDBOX`) is off by default: it needs user namespaces,

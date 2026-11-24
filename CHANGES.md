@@ -87,3 +87,5 @@ Append-only journal, oldest first. Earlier history: `git log` and `docs/handoff.
 2026-11-24 [code] R9.1 and R9.3 (#15): the byte count at a connection's close is tested; the proxy's last refusals reach the summary at every end of a run.
 
 2026-11-24 [note] PManager: "*" live on Render at 12:48:33Z on 44e41bf with CHROMIUM_SANDBOX=true; the start-up sandbox probe passed, so R7.1's options B and C are not needed.
+
+2026-11-24 [code] #20 round 1: a run keeps at most 200 different refusals and one byte-limit entry (R20.1-1); at a stop, late refusals are sent before the exit, tested end to end.

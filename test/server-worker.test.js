@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { loadCatalog, REPO_ROOT } from "../server/catalog.js";
-import { MAX_MESSAGE, childEnv, executeRun, probeSandbox } from "../server/execute.js";
+import { MAX_BLOCKED, MAX_MESSAGE, childEnv, executeRun, probeSandbox } from "../server/execute.js";
 import { timeoutFetch } from "../server/timeout-fetch.js";
 import { parseAllowedHosts } from "../server/hosts.js";
 import { MAX_REPORT_BYTES, MAX_REPORT_FILES, createWorker, summarizeRun } from "../server/worker.js";
@@ -1198,6 +1198,24 @@ process.stdin.on("end", () => {
     assert.equal(bad.error, "The run process sent a malformed message.");
   });
 
+  it("keeps at most MAX_BLOCKED different refusals, however many are sent, and one byte-limit entry (R20.1-1)", async () => {
+    const limit = (n) => `all connections (byte limit: the run moved its ${n} MB through the network guard)`;
+    const batch = (from) => Array.from({ length: 100 }, (_, i) => `h${from + i}.example:443 (private)`);
+    const messages = [
+      { type: "result", result: good, blocked: batch(0) },
+      ...[0, 0, 100, 200, 300, 400].map((from) => ({ type: "blocked", blocked: batch(from) })),
+      // After the cap is full: the byte limit is still kept, once.
+      { type: "blocked", blocked: [limit(100), limit(1), "late.example:443 (private)"] },
+      { type: "blocked", blocked: [limit(2)] },
+      { type: "done" },
+    ];
+    const outcome = await probe(messages);
+    assert.equal(outcome.outcome, "done");
+    assert.equal(outcome.blocked.length, MAX_BLOCKED + 1);
+    assert.deepEqual(outcome.blocked.slice(0, MAX_BLOCKED), [...batch(0), ...batch(100)], "the first different ones, each once");
+    assert.deepEqual(outcome.blocked.filter((e) => e.startsWith("all connections")), [limit(100)]);
+  });
+
   it("keeps only the fields of a result that the worker uses (R8.4)", async () => {
     const outcome = await probe([{ type: "result", result: { ...good, x: Array.from({ length: 1000 }, () => ({})) } }, { type: "done" }]);
     assert.equal(outcome.outcome, "done");
@@ -1326,6 +1344,75 @@ describe("run-child.js sends the refusals left at the end (R9.3)", () => {
     await runJob({ allowedTargetHosts: "", journeys: [], modes: [] }, (m) => sent.push(m), { startProxy: async () => proxy, onProxy: (p) => (told = p) });
     assert.deepEqual(sent, [{ type: "blocked", blocked: [limit, "late.example:443 (private)"] }]);
     assert.equal(told, proxy, "the main block can send what is left at a stop");
+  });
+
+  it("at a stop, sends what is left at once and what came since before exiting, then exits once written (R20.1-3)", async () => {
+    const { stopSoon } = await import("../server/run-child.js");
+    const proxy = { blocked: ["a.example:443 (private)"] };
+    const sent = [];
+    const out = { writableEnded: false, ends: 0, end(done) {
+      this.writableEnded = true;
+      this.ends++;
+      setImmediate(done);
+    } };
+    // stopSoon's timers are unref'd, as the run process's own work keeps it alive; here, this does.
+    const alive = setInterval(() => {}, 1000);
+    after(() => clearInterval(alive));
+    const exited = new Promise((resolve) => stopSoon(() => proxy, (m) => sent.push(m), out, resolve, 20));
+    assert.deepEqual(sent, [{ type: "blocked", blocked: ["a.example:443 (private)"] }], "sent at once");
+    proxy.blocked.push("all connections (byte limit: the run moved its 100 MB through the network guard)");
+    assert.equal(await exited, 143);
+    assert.deepEqual(sent[1], { type: "blocked", blocked: ["all connections (byte limit: the run moved its 100 MB through the network guard)"] }, "the one made since");
+    assert.equal(out.ends, 1, "the messages are ended before the exit");
+
+    // Messages already ended (the job's own end came first): it still exits, without ending again.
+    const ended = { writableEnded: true, ends: 0, end() {
+      this.ends++;
+    } };
+    assert.equal(await new Promise((resolve) => stopSoon(() => null, () => {}, ended, resolve, 0)), 143);
+    assert.equal(ended.ends, 0);
+    clearInterval(alive);
+  });
+
+  it("writes nothing once the messages have ended (R20.1-3)", async () => {
+    const { sender } = await import("../server/run-child.js");
+    const lines = [];
+    const out = { writableEnded: false, write: (line) => lines.push(line) };
+    const send = sender(out);
+    send({ type: "done" });
+    out.writableEnded = true;
+    send({ type: "blocked", blocked: ["x"] });
+    assert.deepEqual(lines, ['{"type":"done"}\n']);
+  });
+
+  it("a stopped run keeps the refusals of the journey it was in, through the real run process (R20.1-2)", async () => {
+    const folder = await mkdtemp(join(tmpdir(), "srj-stop-"));
+    // Stopped once the page's private address has been refused (the page then asks for /after)
+    // and the journey's run() has begun (it asks for /in-run itself), so no result can carry it.
+    const reached = { after: null, "in-run": null };
+    const both = Promise.all(Object.keys(reached).map((name) => new Promise((resolve) => (reached[name] = resolve))));
+    const site = createServer((req, res) => {
+      const name = req.url?.slice(1) ?? "";
+      if (name in reached) return reached[name](), res.end("ok");
+      if (req.url !== "/private.html") return res.writeHead(404).end();
+      res.writeHead(200, { "Content-Type": "text/html" }).end('<!doctype html><title>Private</title><img alt="" src="http://169.254.169.254/srj.png" onerror="fetch(\'/after\')">');
+    });
+    await new Promise((done) => site.listen(0, "127.0.0.1", done));
+    try {
+      const file = join(folder, "hang-private.journey.js");
+      const host = `127.0.0.1:${site.address().port}`;
+      await writeFile(file, `export default { name: "Stopped after a refusal", start: "/private.html", async run() { await fetch("http://${host}/in-run"); await new Promise(() => {}); } };\n`);
+      const job = { baseUrl: `http://${host}/`, journeys: [{ path: "x/hang-private.journey.js", file }], modes: ["walker"], outDir: join(folder, "out"), allowedTargetHosts: host, chromiumSandbox: false };
+      const stop = new AbortController();
+      both.then(() => stop.abort());
+      const outcome = await executeRun(job, { timeoutMs: 60000, signal: stop.signal, log: quiet });
+      assert.equal(outcome.outcome, "aborted");
+      assert.deepEqual(outcome.results, [], "the journey never finished, so only the stop could send it");
+      assert.ok(outcome.blocked.some((e) => e.startsWith("169.254.169.254:80 ")), JSON.stringify(outcome.blocked));
+    } finally {
+      site.close();
+      await rm(folder, { recursive: true, force: true });
+    }
   });
 
   it("sends nothing when nothing is left, or no proxy has started", async () => {
