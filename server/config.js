@@ -28,7 +28,6 @@ function positiveNumber(env, name, fallback) {
   return value;
 }
 
-/** Read and check the settings. Throws with every problem at once, so a misconfigured deploy fails at start-up. */
 /**
  * RUN_AS_UID (and RUN_AS_GID, which defaults to the same number): the unprivileged user that runs
  * each run's browser. Null when unset.
@@ -60,6 +59,9 @@ function runAsUser(env) {
  */
 
 /**
+ * Read and check the settings. Throws with every problem at once, so a misconfigured deploy
+ * fails at start-up.
+ *
  * @param {Record<string, string | undefined>} [env]
  * @returns {Readonly<Config>}
  */

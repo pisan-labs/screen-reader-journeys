@@ -2,6 +2,7 @@
 // may reach, and the egress proxy that enforces it. No network beyond 127.0.0.1.
 import assert from "node:assert/strict";
 import { createServer, request } from "node:http";
+import net from "node:net";
 import { after, before, describe, it } from "node:test";
 import { startEgressProxy } from "../server/egress-proxy.js";
 import { checkTargetUrl, isPrivateAddress, parseAllowedHosts, resolveEgress } from "../server/hosts.js";
@@ -235,5 +236,80 @@ describe("egress proxy", () => {
     for (let i = 0; i < 20; i++) await tunnel("10.0.0.1:443");
     assert.equal(proxy.blocked.length, 50);
     assert.equal(new Set(proxy.blocked).size, 50);
+  });
+});
+
+describe("egress proxy, when the other side misbehaves", () => {
+  const servers = [];
+  let proxy;
+  let silent;
+  let rude;
+  let closed;
+  const tcp = (onSocket) =>
+    new Promise((done) => {
+      const server = net.createServer(onSocket);
+      servers.push(server);
+      server.listen(0, "127.0.0.1", () => done(/** @type {net.AddressInfo} */ (server.address()).port));
+    });
+
+  before(async () => {
+    silent = await tcp(() => {}); // accepts, never answers
+    rude = await tcp((socket) => socket.destroy()); // hangs up at once
+    closed = await tcp(() => {});
+    await new Promise((done) => servers.pop().close(done)); // now nothing listens on it
+    const allowed = [silent, rude, closed].map((port) => `127.0.0.1:${port}`).join(", ");
+    proxy = await startEgressProxy({ rules: parseAllowedHosts(allowed), lookup: async () => ["127.0.0.1"], idleMs: 200 });
+  });
+  after(async () => {
+    await proxy.close();
+    for (const server of servers) server.close();
+  });
+
+  /** Send `text` to the proxy on a plain socket; resolves to all it answers once it closes. */
+  const raw = (text) =>
+    new Promise((resolve, reject) => {
+      const socket = net.connect(Number(new URL(proxy.server).port), "127.0.0.1", () => socket.write(text));
+      let answer = "";
+      const limit = setTimeout(() => {
+        socket.destroy();
+        reject(new Error(`the proxy kept the connection open: ${answer}`));
+      }, 5000);
+      socket.on("data", (chunk) => (answer += chunk));
+      socket.on("error", () => {});
+      socket.on("close", () => {
+        clearTimeout(limit);
+        resolve(answer);
+      });
+    });
+  const get = (port, headers = "") => `GET http://127.0.0.1:${port}/ HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\n${headers}Connection: close\r\n\r\n`;
+
+  it("answers 502 when the site hangs up", async () => {
+    assert.match(await raw(get(rude)), /^HTTP\/1\.1 502/);
+  });
+
+  it("answers 502 when the site never answers, once the idle limit passes", async () => {
+    assert.match(await raw(get(silent)), /^HTTP\/1\.1 502/);
+  });
+
+  it("closes a tunnel to an allowed site that cannot be reached", async () => {
+    assert.equal(await raw(`CONNECT 127.0.0.1:${closed} HTTP/1.1\r\nHost: 127.0.0.1:${closed}\r\n\r\n`), "");
+  });
+
+  it("closes a tunnel that stays idle", async () => {
+    assert.match(await raw(`CONNECT 127.0.0.1:${silent} HTTP/1.1\r\nHost: 127.0.0.1:${silent}\r\n\r\n`), /^HTTP\/1\.1 200 Connection Established\r\n\r\n$/);
+  });
+
+  it("refuses a WebSocket upgrade sent without CONNECT, rather than pass it on unchecked", async () => {
+    const upgrade = `GET http://127.0.0.1:${silent}/ HTTP/1.1\r\nHost: 127.0.0.1:${silent}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n`;
+    assert.match(await raw(upgrade), /^HTTP\/1\.1 403/);
+  });
+
+  it("answers 400 to what is not a proxy request: a relative URL, or another scheme", async () => {
+    assert.match(await raw("GET / HTTP/1.1\r\nHost: example.org\r\nConnection: close\r\n\r\n"), /^HTTP\/1\.1 400/);
+    assert.match(await raw("GET ftp://example.org/ HTTP/1.1\r\nHost: example.org\r\nConnection: close\r\n\r\n"), /^HTTP\/1\.1 400/);
+  });
+
+  it("answers 400 to a CONNECT whose target is not a host and port", async () => {
+    assert.match(await raw("CONNECT %%:443 HTTP/1.1\r\nHost: x\r\n\r\n"), /^HTTP\/1\.1 400/);
   });
 });

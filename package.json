@@ -9,7 +9,7 @@
     "srj": "./src/cli.js"
   },
   "engines": {
-    "node": ">=20.10"
+    "node": ">=22.8"
   },
   "scripts": {
     "test": "node --test test/*.test.js",

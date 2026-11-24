@@ -38,6 +38,16 @@ jobs:
       # server, and the dashboard walked by keyboard with this tool), failing if server/ falls
       # under 85% of lines, branches or functions.
       - run: npm run coverage
+      # The root-only security tests, which the step above skips: runs as the run's user (10001),
+      # its processes and how the worker stops them, as root, as in the Docker image. The run's
+      # user must reach the checkout and the browser, so the checkout's folders are opened for
+      # traversal and Chromium goes to a shared folder.
+      - name: Root-only tests (as root)
+        run: |
+          dir="$GITHUB_WORKSPACE"
+          while [ "$dir" != / ]; do sudo chmod o+x "$dir"; dir="$(dirname "$dir")"; done
+          sudo env "PATH=$PATH" PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers npx playwright install chromium
+          sudo env "PATH=$PATH" PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers node --test test/server-reports.test.js test/server-worker.test.js
       # Applies supabase/migrations to a throwaway PostgreSQL (preinstalled on the runner) and
       # checks its policies and queue.
       - run: npm run test:sql

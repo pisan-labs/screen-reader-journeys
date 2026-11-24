@@ -29,8 +29,7 @@ export function summarizeResult(result, path) {
 /**
  * job: { baseUrl, journeys: [{ path, file }], modes, outDir, allowedTargetHosts, chromiumSandbox }
  * send(message): receives { type: "result", result, blocked } after each journey and mode.
- */
-/**
+ *
  * @param {any} job
  * @param {(message: object) => void} send
  * @param {{ lookup?: (host: string) => Promise<string[]> }} [options]

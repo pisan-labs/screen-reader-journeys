@@ -9,7 +9,7 @@ import { findJourney } from "./catalog.js";
 import { executeRun } from "./execute.js";
 import { resolveEgress } from "./hosts.js";
 import { clearFolders } from "./report-child.js";
-import { checkReportsFolder, listReportFiles, readReportFile, recordReportsFolder, startReportChild, stopUserProcesses } from "./reports.js";
+import { checkReportsFolder, listReportFiles, readReportFile, recordReportsFolder, startReportChild, stopUserProcesses, suidDumpableProblem } from "./reports.js";
 import { validateRunRequest } from "./validate.js";
 
 /** A report larger than this is left out (the database refuses it); the summary says so. */
@@ -86,6 +86,7 @@ export function summarizeRun({ results, blocked, outcome }, files, skipped = [])
  *   exit?: (code: number) => void,
  *   startChild?: typeof startReportChild,
  *   readLimitMs?: number,
+ *   readSuidDumpable?: () => string,
  * }} options
  */
 export function createWorker({
@@ -99,6 +100,7 @@ export function createWorker({
   exit = (code) => process.exit(code),
   startChild = startReportChild,
   readLimitMs = READ_LIMIT_MS,
+  readSuidDumpable = undefined,
 }) {
   let stopping = false;
   let loop = null;
@@ -169,13 +171,28 @@ export function createWorker({
    */
   async function saveReports(runId, dir, { realRoot, uid }) {
     const access = reportAccess();
-    // One limit for the whole read, not only for each request: when it passes, the child is
-    // ended, its pending answer fails, and so does the run.
-    const limit = setTimeout(() => access.close(), readLimitMs);
+    // One limit for all the child's answers together, not only for each request, and not for
+    // the database's writes in between: when it is used up, the child is ended, its pending
+    // answer fails, and so does the run.
+    let budget = readLimitMs;
+    /** @type {<A extends any[], R>(call: (...args: A) => Promise<R>) => (...args: A) => Promise<R>} */
+    const timed = (call) => async (...args) => {
+      if (budget <= 0) {
+        access.close();
+        throw new Error(`reading the reports took longer than ${readLimitMs} ms`);
+      }
+      const started = Date.now();
+      const limit = setTimeout(() => access.close(), budget);
+      try {
+        return await call(...args);
+      } finally {
+        clearTimeout(limit);
+        budget -= Date.now() - started;
+      }
+    };
     try {
-      return await saveReportsWith(access, runId, dir, { realRoot, uid });
+      return await saveReportsWith({ list: timed(access.list), read: timed(access.read) }, runId, dir, { realRoot, uid });
     } finally {
-      clearTimeout(limit);
       access.close();
     }
   }
@@ -294,6 +311,7 @@ export function createWorker({
         log.error(`run ${runId}: removing ${dir}: ${error.code ?? error.message}`);
       });
     }
+    if (!removed) await lockAway(runId, made);
     return removed;
   }
 
@@ -310,7 +328,7 @@ export function createWorker({
         await chown(dir, process.getuid(), process.getgid());
         await chmod(dir, 0o700);
       } catch (error) {
-        log.error(`run ${runId}: closing ${dir}: ${error.code ?? error.message}`);
+        if (error.code !== "ENOENT") log.error(`run ${runId}: closing ${dir}: ${error.code ?? error.message}`);
       }
     }
   }
@@ -451,7 +469,19 @@ export function createWorker({
 
   return {
     tick,
+    /**
+     * Start polling. With RUN_AS_UID, not on a host where the run's user could trace the helper
+     * that stops its processes (reports.js, suidDumpableProblem): the server exits instead.
+     */
     start() {
+      if (!loop && config.runAs) {
+        const problem = suidDumpableProblem(readSuidDumpable);
+        if (problem) {
+          log.error(`not starting the worker: ${problem}`);
+          exit(1);
+          return Promise.resolve();
+        }
+      }
       loop ??= run();
       return loop;
     },

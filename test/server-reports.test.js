@@ -6,7 +6,8 @@ import { link, mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/pr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
-import { checkReportsFolder, killAllOf, listReportFiles, processesOf, readReportFile, recordReportsFolder, startReportChild, stopUserProcesses } from "../server/reports.js";
+import { clearFolders, serve } from "../server/report-child.js";
+import { checkReportsFolder, killAllOf, listReportFiles, processesOf, readReportFile, recordReportsFolder, startReportChild, stopUserProcesses, suidDumpableProblem } from "../server/reports.js";
 
 const MARKER = "SECRET-MARKER-the-server-must-never-read-this";
 let base;
@@ -283,6 +284,28 @@ for (;;) {
     assert.deepEqual(await processesOf(10001), []);
   });
 
+  it("gives no proof, and kills nothing, where fs.suid_dumpable would leave the helper traceable (R2.H-2)", { skip: !root && "needs root, as in the Docker image" }, async () => {
+    const folder = await mkdtemp(join(tmpdir(), "srj-dumpable-"));
+    const setting = join(folder, "suid_dumpable");
+    const child = spawn("sleep", ["60"], { uid: 10001, gid: 10001, detached: true, stdio: "ignore" });
+    const exited = new Promise((resolve) => child.on("exit", (code, signal) => resolve(signal)));
+    try {
+      await until(() => live(child.pid));
+      for (const value of ["1\n", "", "x"]) {
+        await writeFile(setting, value);
+        assert.equal(await killAllOf(10001, 10001, { suidDumpable: setting }), false, `no proof with ${JSON.stringify(value)}`);
+        assert.ok(await live(child.pid), "the helper exited before its kill(-1)");
+      }
+      assert.equal(await killAllOf(10001, 10001, { suidDumpable: join(folder, "missing") }), false, "no proof when it cannot be read");
+      await writeFile(setting, "2\n");
+      assert.equal(await killAllOf(10001, 10001, { suidDumpable: setting }), true, "2 is safe");
+      assert.equal(await exited, "SIGKILL");
+    } finally {
+      await stopUserProcesses(10001);
+      await rm(folder, { recursive: true, force: true });
+    }
+  });
+
   let cc = false;
   try {
     execFileSync("cc", ["--version"], { stdio: "ignore" });
@@ -485,5 +508,90 @@ describe("the report child (reading and deleting as the run's user)", () => {
     assert.deepEqual(await readdir(join(folder, "reports")), []);
     await rm(folder, { recursive: true });
   });
+
+  it("as the run's user, empties reports/ even when the run made reports/ itself read-only (R2.H-1)", { skip: !root && "needs root, as in the Docker image" }, async () => {
+    for (const mode of ["0500", "0000"]) {
+      const folder = await mkdtemp(join(tmpdir(), "srj-child-"));
+      execFileSync("chmod", ["0755", folder]);
+      await mkdir(join(folder, "reports", "sub"), { recursive: true });
+      await writeFile(join(folder, "reports", "sub", "x.md"), "x");
+      await writeFile(join(folder, "reports", "y.md"), "y");
+      execFileSync("chown", ["-R", "10001:10001", join(folder, "reports")]);
+      execFileSync("chmod", [mode, join(folder, "reports")]);
+      const child = startReportChild({ uid: 10001, gid: 10001 });
+      try {
+        assert.deepEqual(await child.call({ op: "clear", dirs: [join(folder, "reports")] }), { left: [] }, `reports/ at ${mode}`);
+      } finally {
+        child.close();
+      }
+      const { readdir } = await import("node:fs/promises");
+      assert.deepEqual(await readdir(join(folder, "reports")), []);
+      await rm(folder, { recursive: true });
+    }
+  });
 });
 
+describe("suidDumpableProblem (R2.H-2)", () => {
+  it("accepts 0 and 2, where the kernel makes the helper non-dumpable when it drops to the user", () => {
+    assert.equal(suidDumpableProblem(() => "0\n"), null);
+    assert.equal(suidDumpableProblem(() => "2\n"), null);
+  });
+
+  it("refuses 1, anything else, and a setting it cannot read", () => {
+    assert.match(suidDumpableProblem(() => "1\n"), /suid_dumpable is "1"/);
+    assert.match(suidDumpableProblem(() => ""), /suid_dumpable is ""/);
+    assert.match(
+      suidDumpableProblem(() => {
+        throw Object.assign(new Error("no such file"), { code: "ENOENT" });
+      }),
+      /cannot read .*ENOENT/
+    );
+  });
+
+  it("reads this host's setting by default", () => {
+    const value = execFileSync("cat", ["/proc/sys/fs/suid_dumpable"], { encoding: "utf8" }).trim();
+    assert.equal(suidDumpableProblem() === null, value === "0" || value === "2");
+  });
+});
+
+describe("report-child.js, in this process", () => {
+  it("answers each request on its channel, sends errors back as errors, and exits on disconnect", async () => {
+    const { EventEmitter } = await import("node:events");
+    const sent = [];
+    const channel = Object.assign(new EventEmitter(), { send: (message) => sent.push(message) });
+    const exits = [];
+    serve(channel, (code) => exits.push(code));
+    const missing = join(tmpdir(), `srj-missing-${process.pid}`);
+    channel.emit("message", { id: 1, request: { op: "clear", dirs: [missing] } });
+    channel.emit("message", { id: 2, request: { op: "nope" } });
+    channel.emit("message", null);
+    for (let i = 0; sent.length < 3 && i < 100; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.deepEqual(
+      sent.sort((a, b) => (a.id ?? 0) - (b.id ?? 0)),
+      [
+        { id: undefined, ok: false, error: "unknown request undefined" },
+        { id: 1, ok: true, value: { left: [] } },
+        { id: 2, ok: false, error: 'unknown request "nope"' },
+      ]
+    );
+    assert.deepEqual(exits, []);
+    channel.emit("disconnect");
+    assert.deepEqual(exits, [0]);
+  });
+
+  it("clears what it may: a missing folder is already empty, one it cannot list is left", async () => {
+    const folder = await mkdtemp(join(tmpdir(), "srj-clear-"));
+    try {
+      await writeFile(join(folder, "a-file"), "not a folder");
+      await mkdir(join(folder, "full", "sub"), { recursive: true });
+      await writeFile(join(folder, "full", "sub", "x.md"), "x");
+      execFileSync("chmod", ["0500", join(folder, "full")]);
+      const result = await clearFolders([join(folder, "missing"), join(folder, "a-file"), join(folder, "full")]);
+      assert.deepEqual(result, { left: [join(folder, "a-file")] });
+      const { readdir } = await import("node:fs/promises");
+      assert.deepEqual(await readdir(join(folder, "full")), [], "a folder it owns is made writable, then emptied");
+    } finally {
+      await rm(folder, { recursive: true, force: true });
+    }
+  });
+});

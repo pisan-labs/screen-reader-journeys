@@ -23,8 +23,7 @@ export function childEnv(env = process.env, overrides = {}) {
  * `runAs: { uid, gid, home }` starts the process as that user, so that a page that breaks out of
  * the browser cannot read this server's environment (its Supabase keys) through /proc. This
  * server must then run as root, as it does in the Docker image.
- */
-/**
+ *
  * @param {object} job
  * @param {{ timeoutMs?: number, signal?: AbortSignal, killAfterMs?: number, runAs?: { uid: number, gid: number, home?: string } | null }} [options]
  * @returns {Promise<{ outcome: string, error: string | null, results: any[], blocked: string[] }>}
@@ -37,6 +36,9 @@ export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs =
     let error = null;
     let settled = false;
     const child = fork(CHILD, [], {
+      // None of this server's node flags: under `npm run server:dev`, --env-file-if-exists=.env
+      // would otherwise load .env (WORKER_TOKEN) into the run's own environment.
+      execArgv: [],
       env: childEnv(process.env, runAs?.home ? { HOME: runAs.home } : {}),
       stdio: ["ignore", "inherit", "inherit", "ipc"],
       serialization: "json",

@@ -151,6 +151,12 @@ shared with other apps). It needs a service of its own, built from this reposito
   The log shows the number of journeys, the allowed sites and the allowed origins. A missing or
   forbidden setting stops the service at start-up, with a list of what is wrong.
 
+  **On the first deploy, check that the worker started.** If the log says
+  `not starting the worker: ... fs.suid_dumpable ...`, the host would let a run trace the helper
+  that stops its processes (see Security), so the service exits and runs nothing. That is a
+  setting of Render's host, not of the image: it cannot be fixed from here, so ask Render, or run
+  the worker on another host.
+
 ## 4. Netlify
 
 `netlify.toml` sets the base directory `web`, the build command `npm run build` and the publish
@@ -205,7 +211,10 @@ Then in the dashboard:
 - **The gates before every push**, which CI runs too:
   - at the root, for the server and the tool: `npm run lint`, `npm run typecheck` (tsc checking
     the JavaScript from its JSDoc) and `npm run coverage` (every test, failing if `server/` falls
-    under 85% of lines, branches or functions);
+    under 85% of lines, branches or functions). Node counts only files that ran, so
+    `test/server-index.test.js` starts `server/index.js` as a real process, and it is measured
+    too. CI runs coverage as an ordinary user and then, as root, the root-only tests of
+    `test/server-reports.test.js` and `test/server-worker.test.js`, which coverage does not count;
   - in `web/`, for the dashboard: `npm run lint`, `npm run typecheck`, `npm run coverage` (at
     least 85%, under jsdom with fakes) and `npm run build`.
 - **`npm run test:sql`** applies the migrations twice to a throwaway local PostgreSQL, on a stub of
@@ -287,15 +296,17 @@ domain only you control, where you can.
     `server/report-child.js`):
     - **the server never reads or deletes the run's files as root.** A short child process that
       runs as the run's user lists and reads the reports, and sends them to the server over IPC.
-      The server checks each answer (its shape, and paths inside the folder), and the whole
-      read has a time limit. Another child empties `reports/` and `home/` at the end. Root then
+      The server checks each answer (its shape, and paths inside the folder), and the child's
+      answers together have a time limit of two minutes (the database's writes in between do not
+      count). Another child empties `reports/` and `home/` at the end. Root then
       removes the two folders and the work folder one at a time with `rmdir`, which never follows
       a link and fails on a folder that is not empty. Whatever a process of that user might
       still do, reading and deleting reach only what that user may anyway. The child first makes
-      the run's own folders writable again, so a folder the run made read-only does not stay.
-      **If anything is still left**, it would be in `/tmp` as that user's, for later runs to
-      read: root takes `reports/` and `home/` and closes them to everyone else (mode 0700), and
-      the server exits, as after a failed stop (below);
+      `reports/`, `home/` and every folder of that user's below them writable again, so a folder
+      the run made read-only does not stay. **If anything is still left** (or root's `rmdir`
+      fails), it would be in `/tmp` as that user's, for later runs to read: root takes
+      `reports/` and `home/` and closes them to everyone else (mode 0700), and the server exits,
+      as after a failed stop (below);
     - the run's work folder belongs to the server (mode 0755); only `reports/` and `home/` inside
       it are the run user's, so the run cannot rename or replace them. Before reading, the
       server checks that `reports/` is still the folder it made: not a link, the same inode, the
@@ -304,11 +315,15 @@ domain only you control, where you can.
       ends every process of that user. Each pass kills every listed pid from root, which they
       cannot block, and then everything of that user at once: a helper calls
       `kill(-1, SIGKILL)` once as that user, which the kernel sends to every process of the
-      user it can signal. The helper
-      starts as root and becomes the user inside itself, with no exec afterwards, so a process
-      of that user can never trace it and fake its result. Root ends the helper after a second
-      if it is stopped. The stop returns only after a pass whose helper ran to
-      the end and a scan after it that finds no live thread of that user; one empty scan is
+      user it can signal. The helper starts as root and becomes the user inside itself, with no
+      exec afterwards, so the kernel marks it non-dumpable and a process of that user cannot
+      trace it or fake its result. That holds only while the host's `fs.suid_dumpable` is 0 or 2,
+      so **with `RUN_AS_UID` set, the worker does not start** (the server exits with a message)
+      if `/proc/sys/fs/suid_dumpable` reads anything else or cannot be read, and the helper
+      reads it again each time before it becomes the user: for anything else it gives no proof,
+      so the stop fails as below. Root ends the
+      helper after a second if it is stopped. The stop returns only after a pass whose helper ran
+      to the end and a scan after it that finds no live thread of that user; one empty scan is
       never taken as proof;
     - **if that stop does not succeed** (within 10 seconds), the run fails or goes back in the
       queue, the server reads and deletes nothing of it, and it exits. With tini as PID 1 the

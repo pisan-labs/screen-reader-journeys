@@ -26,10 +26,15 @@ async function makeRemovable(path) {
   for (const name of await readdir(path).catch(() => [])) await makeRemovable(join(path, name));
 }
 
-/** Remove everything inside each folder (not the folder itself), as this process's user. */
+/**
+ * Remove everything inside each folder (not the folder itself), as this process's user. The
+ * folder and everything below it are made writable first, the folder itself included: the run
+ * may have made reports/ or home/ read-only.
+ */
 export async function clearFolders(dirs) {
   const left = [];
   for (const dir of dirs) {
+    await makeRemovable(dir);
     let names = [];
     try {
       names = await readdir(dir);
@@ -39,7 +44,6 @@ export async function clearFolders(dirs) {
     }
     for (const name of names) {
       try {
-        await makeRemovable(join(dir, name));
         await rm(join(dir, name), { recursive: true, force: true });
       } catch {
         left.push(join(dir, name));
@@ -63,14 +67,23 @@ export async function handle(request) {
   }
 }
 
-if (process.send && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  process.on("message", async (/** @type {any} */ message) => {
+/**
+ * Answer the server's requests on `channel` (this process's IPC channel) until it disconnects,
+ * then exit. Each answer carries the request's id; an error is sent back as an error.
+ *
+ * @param {{ on: (event: string, listener: (...args: any[]) => void) => unknown, send?: (message: any) => unknown }} channel
+ * @param {(code: number) => void} [exit]
+ */
+export function serve(channel, exit = (code) => process.exit(code)) {
+  channel.on("message", async (/** @type {any} */ message) => {
     const { id, request } = message ?? {};
     try {
-      process.send({ id, ok: true, value: await handle(request) });
+      channel.send?.({ id, ok: true, value: await handle(request) });
     } catch (error) {
-      process.send({ id, ok: false, error: String(error?.message ?? error) });
+      channel.send?.({ id, ok: false, error: String(error?.message ?? error) });
     }
   });
-  process.on("disconnect", () => process.exit(0));
+  channel.on("disconnect", () => exit(0));
 }
+
+if (process.send && import.meta.url === pathToFileURL(process.argv[1]).href) serve(process);

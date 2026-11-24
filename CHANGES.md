@@ -45,3 +45,11 @@ Append-only journal, oldest first. Earlier history: `git log` and `docs/handoff.
 2026-11-24 [code] R2.G-1, R2.G-3: the kill helper starts as root and drops to the user with no exec, so the user cannot trace it; the helper-limit test is deterministic.
 
 2026-11-24 [code] R2.G-2, R2.G-4, R2.G-5: a partial clear ends the server; the child's answers are checked, the whole read is bounded; tests fail if root reads or deletes.
+
+2026-11-24 [code] R2.H-1 to R2.H-3 in PR 4: the child empties reports/ made read-only; no worker start unless fs.suid_dumpable is 0 or 2; the read limit counts only the child's answers.
+
+2026-11-24 [decision] Owner: yes to fixing frontend#10's stuck player and unlinked stop hint on the owner's fork branch (a375bde, pushed); no further reply on that PR.
+
+2026-11-24 [decision] PManager: #12 merged at a12086b; R2.H-1 to R2.H-3 and #12's minors R3.1 to R3.5 go in PR 4, from main; one release after PR 4 merges.
+
+2026-11-24 [code] PR 4: CI runs the root-only tests as root; index.js is measured; Node-only lint globals for server/; engines Node >=22.8; the run child forks with no execArgv.
