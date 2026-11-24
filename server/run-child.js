@@ -3,6 +3,7 @@
 // Supabase keys. The parent sends one job; this process reports each result as it finishes,
 // keeps the reports in job.outDir up to date, and exits.
 
+import { createWriteStream } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { loadJourney, runJourney } from "../src/journey.js";
 import { slug, writeReports } from "../src/report.js";
@@ -58,16 +59,22 @@ export async function runJob(job, send, { lookup } = {}) {
   }
 }
 
-if (process.send && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   // Playwright closes its browsers on SIGTERM but leaves the process running; exit soon after.
   process.on("SIGTERM", () => setTimeout(() => process.exit(143), 1500).unref());
-  process.once("message", async (job) => {
+  // The job comes on stdin; messages go to fd 3, one JSON line each (execute.js, readMessages).
+  const out = createWriteStream("", { fd: 3 });
+  const send = (message) => out.write(`${JSON.stringify(message)}\n`);
+  let input = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk) => (input += chunk));
+  process.stdin.on("end", async () => {
     let last = { type: "done" };
     try {
-      await runJob(job, (message) => process.send(message));
+      await runJob(JSON.parse(input), send);
     } catch (error) {
-      last = { type: "error", message: String(error?.message ?? error).split("\n")[0] };
+      last = { type: "error", message: String(error?.message ?? error).split("\n")[0].slice(0, 100_000) };
     }
-    process.send(last, () => process.exit(0));
+    out.end(`${JSON.stringify(last)}\n`, () => process.exit(0));
   });
 }

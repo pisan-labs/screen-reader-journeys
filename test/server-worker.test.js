@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { loadCatalog, REPO_ROOT } from "../server/catalog.js";
-import { childEnv, executeRun, probeSandbox } from "../server/execute.js";
+import { MAX_MESSAGE, childEnv, executeRun, probeSandbox } from "../server/execute.js";
 import { timeoutFetch } from "../server/timeout-fetch.js";
 import { parseAllowedHosts } from "../server/hosts.js";
 import { MAX_REPORT_BYTES, MAX_REPORT_FILES, createWorker, summarizeRun } from "../server/worker.js";
@@ -1053,15 +1053,27 @@ describe("the run process's output is checked before it is used (R6.2)", () => {
   const good = { journey: "targets/x.journey.js", name: "X", mode: "walker", status: "pass", error: null, checks_total: 2, checks_passed: 2, errors: 0, warnings: 1, report_base: "x.walker" };
   const JOB = { journeys: [{ path: good.journey, file: "unused" }], modes: ["walker", "virtual"] };
   /**
-   * Run a probe in place of run-child.js that sends `messages` (and writes `output` to its stdout),
-   * then exits. Resolves to executeRun's outcome, and the lines it logged.
+   * Run a probe in place of run-child.js: it reads the job on stdin, writes `output` to its
+   * stdout, then sends `messages` on fd 3 as JSON lines (or `raw` text instead), and exits.
+   * Resolves to executeRun's outcome, and the lines it logged.
    */
-  const probe = async (messages, { job = JOB, output = "" } = {}) => {
+  const probe = async (messages, { job = JOB, output = "", raw = null } = {}) => {
     const folder = await mkdtemp(join(tmpdir(), "srj-probe-"));
     try {
       const file = join(folder, "probe.mjs");
-      // Each message is sent once the one before it is out, and the channel closed after the last.
-      await writeFile(file, `process.on("message", () => { process.stdout.write(${JSON.stringify(output)}); const all = ${JSON.stringify(messages)}; const next = () => (all.length ? process.send(all.shift(), next) : process.disconnect()); next(); });\n`);
+      const text = raw ?? messages.map((m) => `${JSON.stringify(m)}\n`).join("");
+      await writeFile(
+        file,
+        `import { createWriteStream } from "node:fs";
+let input = "";
+process.stdin.on("data", (c) => (input += c));
+process.stdin.on("end", () => {
+  process.stdout.write(${JSON.stringify(output)});
+  const out = createWriteStream("", { fd: 3 });
+  out.end(${JSON.stringify(text)}, () => process.exit(0));
+});
+`
+      );
       const lines = [];
       const outcome = await executeRun(job, { timeoutMs: 10000, child: file, log: { log: (m) => lines.push(m), error: (m) => lines.push(m) } });
       return Object.assign(outcome, { lines });
@@ -1099,6 +1111,18 @@ describe("the run process's output is checked before it is used (R6.2)", () => {
       assert.deepEqual(outcome.results, []);
     });
   }
+
+  it("refuses a message over the size limit, one still growing past it, and one that is not JSON (R7.5)", async () => {
+    for (const [what, raw] of [
+      ["an over-long line", `${JSON.stringify({ type: "error", message: "m".repeat(MAX_MESSAGE + 10) })}\n`],
+      ["a line that keeps growing", "x".repeat(MAX_MESSAGE + 10)],
+      ["a line that is not JSON", "{not json\n"],
+    ]) {
+      const outcome = await probe([], { raw });
+      assert.equal(outcome.outcome, "error", what);
+      assert.equal(outcome.error, "The run process sent a malformed message.", what);
+    }
+  });
 
   it("takes one result for each journey and mode, and none twice (R7.5)", async () => {
     const twice = await probe([{ type: "result", result: good }, { type: "result", result: good }, { type: "done" }]);
@@ -1210,7 +1234,10 @@ describe("run process environment", () => {
       await writeFile(join(folder, ".env"), "SRJ_PROBE_FROM_DOTENV=leaked\n");
       const probe = join(folder, "probe.mjs");
       // It reports through an "error" message, the one kind that carries free text.
-      await writeFile(probe, 'process.on("message", () => { process.send({ type: "error", message: JSON.stringify({ execArgv: process.execArgv, fromDotenv: process.env.SRJ_PROBE_FROM_DOTENV ?? null }) }); process.disconnect(); });\n');
+      await writeFile(
+        probe,
+        'import { createWriteStream } from "node:fs";\nprocess.stdin.resume();\nprocess.stdin.on("end", () => createWriteStream("", { fd: 3 }).end(JSON.stringify({ type: "error", message: JSON.stringify({ execArgv: process.execArgv, fromDotenv: process.env.SRJ_PROBE_FROM_DOTENV ?? null }) }) + "\\n", () => process.exit(0)));\n'
+      );
       const execute = new URL("../server/execute.js", import.meta.url).href;
       const parent = `import(${JSON.stringify(execute)}).then(async ({ executeRun }) => { const r = await executeRun({}, { timeoutMs: 10000, child: ${JSON.stringify(probe)} }); console.log(JSON.stringify(r)); });`;
       const { stdout } = await promisify(execFile)(process.execPath, ["--env-file-if-exists=.env", "--input-type=module", "-e", parent], { cwd: folder, env: { PATH: process.env.PATH } });

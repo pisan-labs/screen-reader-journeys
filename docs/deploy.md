@@ -402,8 +402,10 @@ domain only you control, where you can.
   - QUIC is turned off, and WebRTC may not use UDP, since neither would go through the proxy.
   - What the run process sends back is checked: results only for the run's own journeys and
     modes, of the right shape; nothing after it is done, has failed or has sent something
-    malformed (which ends the run as an error). Its own output reaches the log quoted, one line
-    at a time, at most 2000 characters a line and 1000 lines a run.
+    malformed (which ends the run as an error). It has no IPC channel: the job goes in on stdin,
+    and its messages come back on a pipe, one JSON line each, at most about 1 MB a line, so it
+    cannot make the server hold more. Its own output reaches the log quoted, one line at a time,
+    at most 2000 characters a line and 1000 lines a run.
 - **Chromium's sandbox** (`CHROMIUM_SANDBOX`) is off by default: it needs user namespaces,
   which many container hosts do not allow.
   - **Without it**, a Chromium exploit in a tested page runs as `runner` inside the container. It

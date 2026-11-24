@@ -1,6 +1,6 @@
 // Start a run's child process and wait for it, with a timeout and a way to abort it.
 
-import { fork } from "node:child_process";
+import { fork, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
@@ -104,6 +104,45 @@ export function probeSandbox(runAs, { timeoutMs = 60000, program = PROBE } = {})
   });
 }
 
+/** The longest message a run process may send, in characters; a longer one is malformed. */
+export const MAX_MESSAGE = 1024 * 1024;
+
+/**
+ * Read a run process's messages from `stream`: one JSON value per line. A line longer than `max`
+ * (or one still growing past it), or one that is not JSON, calls `onBad` once and ends the
+ * reading, so a process cannot make the server hold more than about `max` of its output.
+ */
+export function readMessages(stream, onMessage, onBad, max = MAX_MESSAGE) {
+  let pending = "";
+  let bad = false;
+  const fail = () => {
+    bad = true;
+    pending = "";
+    stream.destroy();
+    onBad();
+  };
+  stream.setEncoding("utf8");
+  stream.on("error", () => {});
+  stream.on("data", (/** @type {string} */ chunk) => {
+    if (bad) return;
+    pending += chunk;
+    for (let newline = pending.indexOf("\n"); newline !== -1; newline = pending.indexOf("\n")) {
+      const line = pending.slice(0, newline);
+      pending = pending.slice(newline + 1);
+      if (line.length > max) return fail();
+      let message;
+      try {
+        message = JSON.parse(line);
+      } catch {
+        return fail();
+      }
+      onMessage(message);
+      if (bad) return;
+    }
+    if (pending.length > max) fail();
+  });
+}
+
 export function childEnv(env = process.env, overrides = {}) {
   const passed = Object.fromEntries(Object.entries(env).filter(([name, value]) => passes(name) && value !== undefined));
   return { ...passed, ...overrides };
@@ -131,13 +170,13 @@ export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs =
     let outcome = null;
     let error = null;
     let settled = false;
-    const child = fork(program, [], {
-      // None of this server's node flags: under `npm run server:dev`, --env-file-if-exists=.env
-      // would otherwise load .env (WORKER_TOKEN) into the run's own environment.
-      execArgv: [],
+    // Started with node and the program only, so none of this server's node flags: under
+    // `npm run server:dev`, --env-file-if-exists=.env would otherwise load .env (WORKER_TOKEN)
+    // into the run's own environment. No IPC channel, whose messages have no size limit: the job
+    // goes in on stdin, and the messages come back on fd 3, one JSON line each (readMessages).
+    const child = spawn(process.execPath, [program], {
       env: childEnv(process.env, runAs?.home ? { HOME: runAs.home } : {}),
-      stdio: ["ignore", "pipe", "pipe", "ipc"],
-      serialization: "json",
+      stdio: ["pipe", "pipe", "pipe", "pipe"],
       ...(runAs ? { uid: runAs.uid, gid: runAs.gid } : {}),
     });
 
@@ -173,7 +212,7 @@ export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs =
     // One result for each journey and mode of the job, and no other.
     const expected = new Set((job?.journeys ?? []).flatMap((j) => (job?.modes ?? []).map((mode) => `${j.path}\n${mode}`)));
     const taken = new Set();
-    child.on("message", (/** @type {any} */ message) => {
+    const onMessage = (/** @type {any} */ message) => {
       if (closed) return;
       if (message?.type === "result") {
         const refused = blockedOf(message.blocked ?? []);
@@ -194,19 +233,33 @@ export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs =
       } else {
         malformed();
       }
-    });
+    };
+    const messages = /** @type {import("node:stream").Readable} */ (child.stdio[3]);
+    if (messages) readMessages(messages, onMessage, malformed);
     child.on("error", (spawnError) => {
       outcome ??= "error";
       error ??= `Could not start the run process: ${spawnError.message}`;
       settle();
     });
-    child.on("exit", (code, signalName) => {
+    // Settled once its pipes are drained ("close"), so no message written just before it exited is
+    // lost; or a moment after "exit", if something it started still holds a pipe open.
+    let ended = null;
+    const end = () => {
       if (!outcome) {
         outcome = "error";
-        error = `The run process stopped unexpectedly (${signalName ?? `exit code ${code}`}).`;
+        error = `The run process stopped unexpectedly (${ended}).`;
       }
       settle();
+    };
+    child.on("exit", (code, signalName) => {
+      ended = signalName ?? `exit code ${code}`;
+      setTimeout(end, 2000).unref();
     });
-    child.send(job);
+    child.on("close", (code, signalName) => {
+      ended ??= signalName ?? `exit code ${code}`;
+      end();
+    });
+    child.stdin?.on("error", () => {});
+    child.stdin?.end(JSON.stringify(job));
   });
 }
