@@ -6,6 +6,7 @@ import { link, mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/pr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
+import { clearFolders, serve } from "../server/report-child.js";
 import { checkReportsFolder, killAllOf, listReportFiles, processesOf, readReportFile, recordReportsFolder, startReportChild, stopUserProcesses, suidDumpableProblem } from "../server/reports.js";
 
 const MARKER = "SECRET-MARKER-the-server-must-never-read-this";
@@ -553,3 +554,44 @@ describe("suidDumpableProblem (R2.H-2)", () => {
   });
 });
 
+describe("report-child.js, in this process", () => {
+  it("answers each request on its channel, sends errors back as errors, and exits on disconnect", async () => {
+    const { EventEmitter } = await import("node:events");
+    const sent = [];
+    const channel = Object.assign(new EventEmitter(), { send: (message) => sent.push(message) });
+    const exits = [];
+    serve(channel, (code) => exits.push(code));
+    const missing = join(tmpdir(), `srj-missing-${process.pid}`);
+    channel.emit("message", { id: 1, request: { op: "clear", dirs: [missing] } });
+    channel.emit("message", { id: 2, request: { op: "nope" } });
+    channel.emit("message", null);
+    for (let i = 0; sent.length < 3 && i < 100; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.deepEqual(
+      sent.sort((a, b) => (a.id ?? 0) - (b.id ?? 0)),
+      [
+        { id: undefined, ok: false, error: "unknown request undefined" },
+        { id: 1, ok: true, value: { left: [] } },
+        { id: 2, ok: false, error: 'unknown request "nope"' },
+      ]
+    );
+    assert.deepEqual(exits, []);
+    channel.emit("disconnect");
+    assert.deepEqual(exits, [0]);
+  });
+
+  it("clears what it may: a missing folder is already empty, one it cannot list is left", async () => {
+    const folder = await mkdtemp(join(tmpdir(), "srj-clear-"));
+    try {
+      await writeFile(join(folder, "a-file"), "not a folder");
+      await mkdir(join(folder, "full", "sub"), { recursive: true });
+      await writeFile(join(folder, "full", "sub", "x.md"), "x");
+      execFileSync("chmod", ["0500", join(folder, "full")]);
+      const result = await clearFolders([join(folder, "missing"), join(folder, "a-file"), join(folder, "full")]);
+      assert.deepEqual(result, { left: [join(folder, "a-file")] });
+      const { readdir } = await import("node:fs/promises");
+      assert.deepEqual(await readdir(join(folder, "full")), [], "a folder it owns is made writable, then emptied");
+    } finally {
+      await rm(folder, { recursive: true, force: true });
+    }
+  });
+});

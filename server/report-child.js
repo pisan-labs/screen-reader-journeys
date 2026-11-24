@@ -67,14 +67,23 @@ export async function handle(request) {
   }
 }
 
-if (process.send && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  process.on("message", async (/** @type {any} */ message) => {
+/**
+ * Answer the server's requests on `channel` (this process's IPC channel) until it disconnects,
+ * then exit. Each answer carries the request's id; an error is sent back as an error.
+ *
+ * @param {{ on: (event: string, listener: (...args: any[]) => void) => unknown, send?: (message: any) => unknown }} channel
+ * @param {(code: number) => void} [exit]
+ */
+export function serve(channel, exit = (code) => process.exit(code)) {
+  channel.on("message", async (/** @type {any} */ message) => {
     const { id, request } = message ?? {};
     try {
-      process.send({ id, ok: true, value: await handle(request) });
+      channel.send?.({ id, ok: true, value: await handle(request) });
     } catch (error) {
-      process.send({ id, ok: false, error: String(error?.message ?? error) });
+      channel.send?.({ id, ok: false, error: String(error?.message ?? error) });
     }
   });
-  process.on("disconnect", () => process.exit(0));
+  channel.on("disconnect", () => exit(0));
 }
+
+if (process.send && import.meta.url === pathToFileURL(process.argv[1]).href) serve(process);
