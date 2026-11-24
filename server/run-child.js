@@ -10,7 +10,20 @@ import { slug, writeReports } from "../src/report.js";
 import { startEgressProxy } from "./egress-proxy.js";
 import { needsSandbox, parseAllowedHosts } from "./hosts.js";
 
-/** The numbers the database keeps for one journey in one mode. */
+/** The longest error a result carries, in code points (R9.6). */
+export const RESULT_ERROR_POINTS = 10_000;
+
+/**
+ * At most `max` code points of `text`, well formed. The cut is taken from a bounded slice first,
+ * which holds at least `max` code points.
+ */
+const points = (text, max) => Array.from(String(text).slice(0, 2 * max).toWellFormed()).slice(0, max).join("");
+
+/**
+ * The numbers the database keeps for one journey in one mode. The error is cut, so that a valid
+ * result always fits in one message (execute.js, MAX_MESSAGE): even fully escaped, 10,000 code
+ * points stay under 262,144 characters.
+ */
 export function summarizeResult(result, path) {
   const failed = result.expectations.filter((e) => !e.ok).length;
   return {
@@ -18,7 +31,7 @@ export function summarizeResult(result, path) {
     name: result.journey,
     mode: result.mode,
     status: result.status,
-    error: result.error ?? null,
+    error: result.error == null ? null : points(result.error, RESULT_ERROR_POINTS),
     checks_total: result.expectations.length,
     checks_passed: result.expectations.length - failed,
     errors: result.findings.filter((f) => f.level === "error").length,

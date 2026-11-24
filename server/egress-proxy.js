@@ -18,7 +18,11 @@ import { createServer, request as httpRequest } from "node:http";
 import { connect } from "node:net";
 import { resolveEgress, systemLookup } from "./hosts.js";
 
-const MAX_BLOCKED = 50;
+/**
+ * The most refusals waiting to be sent: each result takes them (run-child.js), and the worker
+ * keeps at most 200 different ones for the whole run (execute.js, MAX_BLOCKED).
+ */
+const MAX_BLOCKED_PER_SEND = 50;
 export const MAX_BYTES = 100 * 1024 * 1024;
 export const MAX_NAMES = 500;
 /** The start of the entry that says a run reached MAX_BYTES; summaries keep it first. */
@@ -36,23 +40,30 @@ const strip = (headers) => Object.fromEntries(Object.entries(headers).filter(([n
  * @param {{ rules?: any[], lookup?: (host: string) => Promise<string[]>, idleMs?: number, maxBytes?: number, maxNames?: number, connectTo?: typeof connect, requestTo?: typeof httpRequest }} [options]
  */
 export async function startEgressProxy({ rules, lookup = systemLookup, idleMs = 60000, maxBytes = MAX_BYTES, maxNames = MAX_NAMES, connectTo = connect, requestTo = httpRequest } = {}) {
-  // Distinct refusals only, and at most MAX_BLOCKED of them: a page can make requests in a loop.
+  // Each refusal once a run, and at most MAX_BLOCKED_PER_SEND waiting: a page can make requests
+  // in a loop.
   const blocked = [];
   const seen = new Set();
   // Each host name is looked up once a run, and at most `maxNames` of them: a page cannot make
   // the server send DNS queries for names it chooses without end.
+  // A lookup that fails (a DNS hiccup, say) is not kept, so the host is tried again later, but it
+  // still counts toward `maxNames` (R9.4).
   const names = new Map();
+  let lookedUp = 0;
   const lookupOnce = (host) => {
     if (!names.has(host)) {
-      if (names.size >= maxNames) return Promise.reject(new Error(`more than ${maxNames} host names in this run`));
-      names.set(host, lookup(host));
+      if (lookedUp >= maxNames) return Promise.reject(new Error(`more than ${maxNames} host names in this run`));
+      lookedUp += 1;
+      const answer = lookup(host);
+      names.set(host, answer);
+      answer.catch(() => names.get(host) === answer && names.delete(host));
     }
     return names.get(host);
   };
   const decide = async (host, port) => {
     const decision = await resolveEgress(host, port, rules, lookupOnce);
     const entry = `${host}:${port} (${decision.reason})`;
-    if (!decision.ok && blocked.length < MAX_BLOCKED && !seen.has(entry)) {
+    if (!decision.ok && blocked.length < MAX_BLOCKED_PER_SEND && !seen.has(entry)) {
       seen.add(entry);
       blocked.push(entry);
     }

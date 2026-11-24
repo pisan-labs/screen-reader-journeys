@@ -302,11 +302,14 @@ where you can.
 - **A run's progress.** While a run is running, its page shows which journey and mode it is on
   ("Running 2 of 4: …"), the results so far, the step, and the time against the time limit. The
   worker holds this in memory, from the run process's checked messages (a "progress" message
-  when a journey and mode starts, and its step at most once a second), and the API serves it to
-  the run's owner only (`GET /runs/:id/progress`, which reads the run through the person's own
-  client first). Nothing is stored: a server that is not running the run answers
-  `{ "progress": null }`. The page's status line says the journey and the results when they
-  change, not the step or the clock.
+  when a journey and mode starts, and its step at most once a second; the worker passes on at
+  most one step each half second, and a run that sends more than 5000 progress messages ends as
+  malformed), and the API serves it to the run's owner only (`GET /runs/:id/progress`, which
+  reads the run through the person's own client first). Between a result and the next start it
+  names no journey ("starting"), and while the reports are saved it says so, keeping the results.
+  The time is the server's own (`elapsed_s`), so the visitor's clock does not matter. Nothing is
+  stored: a server that is not running the run answers `{ "progress": null }`. The page's status
+  line says the journey and the results when they change, not the step or the clock.
 
 - **Updates.**
   - Netlify builds on every push to `main`. Render deploys as its service is set up.
@@ -324,10 +327,12 @@ where you can.
     the browser's own connections to it (request lines, headers, bodies, uploads and tunnels
     alike; checked every 50 ms, so a run may pass it by what moves in that time). Then every
     connection is closed and new ones are refused; the run's blocked requests say so first, also
-    when the run ends early (a timeout, or a journey that fails), and the server logs one line.
-    A run stopped because the server is shutting down (a deploy) is put back in the queue and
-    starts again, so its summary is the new run's. A run may also look up at most 500 host names,
-    each once. Its blocked requests keep at most 200 different entries, plus the byte limit's.
+    when the run ends early (a timeout, or an error that ends the job, such as a journey that
+    cannot be loaded), and the server logs one line. A run stopped because the server is
+    shutting down (a deploy) is put back in the queue and starts again, so its summary is the new
+    run's. After a stop, no new journey or mode starts, and a result the stop cut short is not
+    counted. A run may also look up at most 500 host names, each once (a lookup that fails is
+    tried again, and counted again).
   - Per run: one result for each of the run's journeys and modes (a unique constraint), and at
     most 200 report files and 20 MiB of reports, of at most 2 MiB each.
   - A file is left out if it is a link or another non-file, is over 2 MiB, has a name the
@@ -345,7 +350,10 @@ where you can.
 
   Deleting a run, or the account, deletes its results and reports at once.
 - **Logs.** Render's log shows each run starting and ending. The network guard's refusals are
-  stored with the run (`summary.blocked_requests`) and shown on the run page.
+  stored with the run (`summary.blocked_requests`) and shown on the run page. The server keeps
+  at most 200 different ones a run, plus the byte limit's; the summary shows the first 50, the
+  byte limit's first, each cut to 300 characters and each once as cut, and when it shows fewer
+  than there were, it counts them all (`summary.blocked_count`, "And N more." on the page).
 
 ## Security
 

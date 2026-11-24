@@ -732,4 +732,21 @@ describe("the egress proxy connects to the checked address, and limits a run's b
       await proxy.close();
     }
   });
+
+  it("tries a host again after a failed lookup, and counts each try toward the limit (R9.4)", async () => {
+    const asked = [];
+    const lookup = async (host) => {
+      asked.push(host);
+      if (asked.length === 1) throw Object.assign(new Error("getaddrinfo EAI_AGAIN a.example"), { code: "EAI_AGAIN" });
+      return ["10.9.9.9"];
+    };
+    const proxy = await startEgressProxy({ rules: parseAllowedHosts("*"), maxNames: 3, lookup });
+    try {
+      for (const host of ["a.example", "a.example", "a.example", "b.example", "c.example"]) await tunnel(proxy, `${host}:443`);
+      assert.deepEqual(asked, ["a.example", "a.example", "b.example"], "the failed one again; the answer after it kept");
+      assert.ok(proxy.blocked.some((b) => b.startsWith("c.example:443 ") && /more than 3 host names in this run/.test(b)), proxy.blocked.join("\n"));
+    } finally {
+      await proxy.close();
+    }
+  });
 });

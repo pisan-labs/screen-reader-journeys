@@ -115,6 +115,8 @@ const short = (text, max = 500) => {
 };
 
 export function summarizeRun({ results, blocked, outcome }, files, skipped = []) {
+  const refused = [...new Set([...blocked.filter(isByteLimit), ...blocked].map((entry) => cut(entry, BLOCKED_CHARS)))];
+  /** @type {Record<string, any>} */
   const summary = {
     results: results.length,
     passed: results.filter((r) => r.status === "pass").length,
@@ -125,8 +127,9 @@ export function summarizeRun({ results, blocked, outcome }, files, skipped = [])
     files,
     // Named up to a limit and counted in full, so a run that wrote thousands of files still fits.
     ...(skipped.length ? { skipped_files: skipped.slice(0, SKIPPED_NAMED).map((name) => cut(name, NAME_CHARS)), skipped_count: skipped.length } : {}),
-    // The byte limit's entry first, so neither the cap of 50 nor the size guard drops it.
-    blocked_requests: [...new Set([...blocked.filter(isByteLimit), ...blocked])].slice(0, 50).map((entry) => cut(entry, BLOCKED_CHARS)),
+    // The byte limit's entry first, so neither the cap of 50 nor the size guard drops it; each
+    // entry once as shown, so after the cut (R6.3).
+    blocked_requests: refused.slice(0, 50),
     timed_out: outcome === "timeout",
   };
   // Then, until it fits: fewer named files (one stays, so the page still says why), fewer blocked
@@ -136,6 +139,8 @@ export function summarizeRun({ results, blocked, outcome }, files, skipped = [])
   while (size() > SUMMARY_BYTES && named.length > 1) named.pop();
   while (size() > SUMMARY_BYTES && summary.blocked_requests.length) summary.blocked_requests.pop();
   while (size() > SUMMARY_BYTES && named.length) named.pop();
+  // How many there were, when the page shows fewer (R6.3).
+  if (refused.length > summary.blocked_requests.length) summary.blocked_count = refused.length;
   return summary;
 }
 
@@ -479,24 +484,24 @@ export function createWorker({
         chromiumSandbox: config.chromiumSandbox,
       };
       const runAs = config.runAs ? { ...config.runAs, home: dirs.home } : null;
-      live = { runId: run.id, startedAt: new Date().toISOString(), of: job.journeys.length * job.modes.length, journey: null, mode: null, step: null, n: null, done: 0, passed: 0, failed: 0, errored: 0 };
+      live = { runId: run.id, phase: "running", startedAt: new Date().toISOString(), startedMs: now(), of: job.journeys.length * job.modes.length, journey: null, mode: null, step: null, n: null, done: 0, passed: 0, failed: 0, errored: 0 };
       const onEvent = (event) => {
         if (!live || live.runId !== run.id) return;
         if (event.kind === "start") Object.assign(live, { journey: event.journey, mode: event.mode, step: null, n: null });
         else if (event.kind === "step") Object.assign(live, { step: event.step, n: event.n });
         else if (event.kind === "result") {
+          // Until the next start, the page says the next one is starting (R19.1-4).
+          Object.assign(live, { journey: null, mode: null, step: null, n: null });
           live.done += 1;
           if (event.status === "pass") live.passed += 1;
           else if (event.status === "fail") live.failed += 1;
           else live.errored += 1;
         }
       };
-      let outcome;
-      try {
-        outcome = await execute(job, { timeoutMs: config.runTimeoutMs, signal: current.signal, runAs, log, onEvent });
-      } finally {
-        live = null;
-      }
+      const outcome = await execute(job, { timeoutMs: config.runTimeoutMs, signal: current.signal, runAs, log, onEvent });
+      // The run still reads "running" while its reports are saved: say so, keeping what it did
+      // (R19.1-5). The progress goes when the run is finished, failed or requeued (finally).
+      Object.assign(live, { phase: "saving", journey: null, mode: null, step: null, n: null });
       if (outcome.blocked.some(isByteLimit)) log.log(`run ${run.id}: the network guard's byte limit closed its connections`);
       if (outcome.outcome === "aborted") {
         // The server is shutting down (a deploy, say): put the run back for the next instance.
@@ -525,6 +530,7 @@ export function createWorker({
       );
     } finally {
       current = null;
+      live = null;
       // On every path (done, failed, aborted for a deploy): nothing of this run may outlive it.
       try {
         await stopRunProcesses();
@@ -650,8 +656,10 @@ export function createWorker({
     /** The progress of run `runId`, if this worker is running it now; null otherwise. */
     progressOf(runId) {
       if (!live || live.runId !== runId) return null;
-      const { journey, mode, step, n, done, of, passed, failed, errored, startedAt } = live;
-      return { journey, mode, step, n, index: Math.min(done + 1, of), of, done, passed, failed, errored, started_at: startedAt, time_limit_s: Math.round(config.runTimeoutMs / 1000) };
+      const { phase, journey, mode, step, n, done, of, passed, failed, errored, startedAt, startedMs } = live;
+      // Time from this server's own clock, so the browser's clock does not matter (R19.1-6).
+      const elapsed_s = Math.max(0, Math.round((now() - startedMs) / 1000));
+      return { phase, journey, mode, step, n, index: Math.min(done + 1, of), of, done, passed, failed, errored, started_at: startedAt, elapsed_s, time_limit_s: Math.round(config.runTimeoutMs / 1000) };
     },
     get busy() {
       return current !== null;

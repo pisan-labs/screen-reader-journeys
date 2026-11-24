@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { loadCatalog, REPO_ROOT } from "../server/catalog.js";
-import { MAX_BLOCKED, MAX_MESSAGE, childEnv, executeRun, probeSandbox } from "../server/execute.js";
+import { MAX_BLOCKED, MAX_MESSAGE, MAX_PROGRESS, STEP_EVERY_MS, childEnv, executeRun, probeSandbox } from "../server/execute.js";
 import { timeoutFetch } from "../server/timeout-fetch.js";
 import { parseAllowedHosts } from "../server/hosts.js";
 import { MAX_REPORT_BYTES, MAX_REPORT_FILES, createWorker, summarizeRun } from "../server/worker.js";
@@ -358,10 +358,35 @@ describe("worker, with a fake run process", () => {
     assert.equal(worker.progressOf("some-other-run"), null);
     release();
     await ticking;
-    assert.deepEqual({ ...seen, started_at: typeof seen.started_at }, {
-      journey: BASIC, mode: "virtual", step: null, n: null, index: 2, of: 2, done: 1, passed: 0, failed: 1, errored: 0, started_at: "string", time_limit_s: 60,
+    assert.deepEqual({ ...seen, started_at: typeof seen.started_at, elapsed_s: typeof seen.elapsed_s }, {
+      phase: "running", journey: BASIC, mode: "virtual", step: null, n: null, index: 2, of: 2, done: 1, passed: 0, failed: 1, errored: 0, started_at: "string", elapsed_s: "number", time_limit_s: 60,
     });
     assert.equal(worker.progressOf(run.id), null, "forgotten once the run has ended");
+  });
+
+  it("names no journey between a result and the next start, says when the reports are saved, and times the run on its own clock (R19.1-4 to -6)", async () => {
+    const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC], modes: ["walker", "virtual"] });
+    const fake = fakeSupabase({ runs: [run] });
+    const db = dbOf(fake);
+    let worker;
+    let afterResult;
+    let saving;
+    let t = 5000;
+    const execute = async (job, { onEvent }) => {
+      t += 42_000;
+      onEvent({ kind: "start", journey: BASIC, mode: "walker" });
+      onEvent({ kind: "step", journey: BASIC, mode: "walker", step: "press Tab", n: 2 });
+      onEvent({ kind: "result", journey: BASIC, mode: "walker", status: "pass" });
+      afterResult = worker.progressOf(run.id);
+      return { outcome: "done", error: null, results: [summary(BASIC, "walker")], blocked: [] };
+    };
+    const slow = { ...db, addResults: async (...args) => ((saving = worker.progressOf(run.id)), db.addResults(...args)) };
+    worker = createWorker({ db: slow, catalog, config, execute, lookup, log: quiet, now: () => t });
+    await worker.tick();
+    assert.deepEqual([afterResult.phase, afterResult.journey, afterResult.mode, afterResult.step, afterResult.n, afterResult.done, afterResult.index], ["running", null, null, null, null, 1, 2]);
+    assert.deepEqual([saving.phase, saving.journey, saving.done, saving.passed], ["saving", null, 1, 1], "still shown while the reports are saved");
+    assert.equal(saving.elapsed_s, 42, "from the server's own clock");
+    assert.equal(worker.progressOf(run.id), null);
   });
 
   it("hands the run process only the checked job", async () => {
@@ -1076,6 +1101,24 @@ describe("worker, with a fake run process", () => {
   });
 });
 
+describe("a run's refused requests in its summary (R6.3)", () => {
+  it("are each shown once as cut, and counted when the page shows fewer", () => {
+    // cut() keeps an entry's start and end, so these differ only in the part it leaves out.
+    const long = (middle) => `${"h".repeat(250)}${middle}${"h".repeat(100)}.example:443 (private)`;
+    const one = summarizeRun({ results: [], blocked: [long("a"), long("b"), "x.example:443 (private)"], outcome: "done" }, [], []);
+    assert.equal(one.blocked_requests.length, 2, "two entries that look the same once cut are one");
+    assert.equal(one.blocked_count, undefined, "all are shown");
+    const many = Array.from({ length: 80 }, (_, i) => `h${i}.example:443 (private)`);
+    const lots = summarizeRun({ results: [], blocked: many, outcome: "done" }, [], []);
+    assert.deepEqual([lots.blocked_requests.length, lots.blocked_count], [50, 80]);
+    // Entries the size guard drops are counted too.
+    const big = Array.from({ length: 50 }, (_, i) => `${i}${"z".repeat(2000)}`);
+    const guarded = summarizeRun({ results: [], blocked: big, outcome: "done" }, Array.from({ length: 200 }, (_, i) => `${"f".repeat(190)}${i}.md`), []);
+    assert.ok(guarded.blocked_requests.length < 50);
+    assert.equal(guarded.blocked_count, 50);
+  });
+});
+
 describe("a run's summary fits the database's 64 KiB check (R5.1)", () => {
   const outcome = (blocked = []) => ({ results: [], blocked, outcome: "done" });
   const bytes = (summary) => Buffer.byteLength(JSON.stringify(summary));
@@ -1133,7 +1176,7 @@ describe("the run process's output is checked before it is used (R6.2)", () => {
    * stdout, then sends `messages` on fd 3 as JSON lines (or `raw` text instead), and exits.
    * Resolves to executeRun's outcome, and the lines it logged.
    */
-  const probe = async (messages, { job = JOB, output = "", raw = null } = {}) => {
+  const probe = async (messages, { job = JOB, output = "", raw = null, now = undefined } = {}) => {
     const folder = await mkdtemp(join(tmpdir(), "srj-probe-"));
     try {
       const file = join(folder, "probe.mjs");
@@ -1152,7 +1195,7 @@ process.stdin.on("end", () => {
       );
       const lines = [];
       const events = [];
-      const outcome = await executeRun(job, { timeoutMs: 10000, child: file, log: { log: (m) => lines.push(m), error: (m) => lines.push(m) }, onEvent: (e) => events.push(e) });
+      const outcome = await executeRun(job, { timeoutMs: 10000, child: file, log: { log: (m) => lines.push(m), error: (m) => lines.push(m) }, onEvent: (e) => events.push(e), ...(now ? { now } : {}) });
       return Object.assign(outcome, { lines, events });
     } finally {
       await rm(folder, { recursive: true, force: true });
@@ -1266,12 +1309,32 @@ process.stdin.on("end", () => {
     ["with a step that is too long", { type: "progress", journey: good.journey, mode: "walker", step: "s".repeat(201), n: 1 }],
     ["with a step that is not text", { type: "progress", journey: good.journey, mode: "walker", step: { x: 1 }, n: 1 }],
     ["with a step number that is not a count", { type: "progress", journey: good.journey, mode: "walker", step: "Tab", n: -1 }],
+    // A template string would make these match the job's key (R19.1-1).
+    ["with a journey that is not text", { type: "progress", journey: [good.journey], mode: "walker" }],
+    ["with a mode that is not text", { type: "progress", journey: good.journey, mode: [["walker"]] }],
   ]) {
     it(`ends the run as an error on progress ${what}`, async () => {
       const outcome = await probe([message, { type: "done" }]);
       assert.deepEqual([outcome.outcome, outcome.error, outcome.events], ["error", "The run process sent a malformed message.", []]);
     });
   }
+
+  it("ends a run that sends more than MAX_PROGRESS progress messages, and passes on steps at most one each STEP_EVERY_MS (R19.1-2)", async () => {
+    const start = { type: "progress", journey: good.journey, mode: "walker" };
+    const flood = await probe([...Array.from({ length: MAX_PROGRESS + 1 }, () => start), { type: "done" }]);
+    assert.equal(flood.error, "The run process sent a malformed message.");
+    assert.equal(flood.events.length, MAX_PROGRESS, "all up to the limit were taken");
+    const fine = await probe([...Array.from({ length: MAX_PROGRESS }, () => start), { type: "done" }]);
+    assert.equal(fine.outcome, "done");
+    // Five steps in one burst: only the first goes on, then the next one STEP_EVERY_MS later.
+    let t = 0;
+    const steps = (from) => Array.from({ length: 5 }, (_, i) => ({ ...start, step: `s${from + i}`, n: from + i }));
+    const burst = await probe([start, ...steps(1), { type: "done" }], { now: () => t });
+    assert.deepEqual(burst.events.filter((e) => e.kind === "step").map((e) => e.step), ["s1"]);
+    t = STEP_EVERY_MS;
+    const later = await probe([start, ...steps(1), { type: "done" }], { now: () => (t += STEP_EVERY_MS / 2) });
+    assert.deepEqual(later.events.filter((e) => e.kind === "step").map((e) => e.step), ["s1", "s3", "s5"]);
+  });
 
   it("refuses progress for a journey and mode that has already finished", async () => {
     const outcome = await probe([{ type: "result", result: good }, { type: "progress", journey: good.journey, mode: "walker" }]);
@@ -1287,6 +1350,37 @@ process.stdin.on("end", () => {
   it("stops reading once the process says it is done (R8.4)", async () => {
     const outcome = await probe([], { raw: `${JSON.stringify({ type: "done" })}\n{not json\n${"x".repeat(MAX_MESSAGE + 10)}` });
     assert.deepEqual([outcome.outcome, outcome.error], ["done", null], "what came after done was never parsed");
+  });
+
+  it("reads nothing more once the run has settled, even from a process that still holds the pipe (R9.5)", async () => {
+    const folder = await mkdtemp(join(tmpdir(), "srj-late-"));
+    const mark = join(folder, "written");
+    try {
+      // The process exits at once, leaving behind one that writes a result after the 2 s settle.
+      // Once the server has stopped reading, that write fails (EPIPE); the mark says it was tried.
+      const late = `setTimeout(() => { try { require("fs").writeSync(3, JSON.stringify({ type: "result", result: ${JSON.stringify(good)} }) + "\\n"); } catch {} require("fs").writeFileSync(${JSON.stringify(mark)}, "x"); }, 2600)`;
+      const outcome = await runSource(`spawn(process.execPath, ["-e", ${JSON.stringify(late)}], { stdio: ["ignore", "ignore", "ignore", 3] }).unref();\nprocess.exit(0);`);
+      assert.match(outcome.error, /stopped unexpectedly/);
+      for (let i = 0; i < 100 && !existsSync(mark); i++) await new Promise((r) => setTimeout(r, 50));
+      assert.ok(existsSync(mark), "the late result was sent");
+      await new Promise((r) => setImmediate(r));
+      assert.deepEqual(outcome.results, [], "and not taken");
+    } finally {
+      await rm(folder, { recursive: true, force: true });
+    }
+  });
+
+  it("a result's error is cut to RESULT_ERROR_POINTS code points, so any valid result fits in one message (R9.6)", async () => {
+    const { RESULT_ERROR_POINTS, summarizeResult } = await import("../server/run-child.js");
+    const result = (error) => ({ journey: "J", mode: "walker", status: "error", error, expectations: [], findings: [] });
+    for (const error of ["\u{1F600}".repeat(200_000), "\u0001".repeat(300_000), `${"a".repeat(RESULT_ERROR_POINTS * 2 - 1)}\u{1F600}`]) {
+      const summary = summarizeResult(result(error), "targets/j.journey.js");
+      assert.ok(Array.from(summary.error).length <= RESULT_ERROR_POINTS);
+      assert.ok(summary.error.isWellFormed());
+      assert.ok(JSON.stringify({ type: "result", result: summary, blocked: [] }).length < MAX_MESSAGE);
+    }
+    assert.equal(summarizeResult(result(null), "x").error, null);
+    assert.equal(summarizeResult(result("short"), "x").error, "short");
   });
 
   it("still takes a result already on its way when the time is up, until the process ends (R8.5)", async () => {
