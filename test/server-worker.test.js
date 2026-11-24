@@ -16,7 +16,7 @@ import { loadCatalog, REPO_ROOT } from "../server/catalog.js";
 import { childEnv, executeRun } from "../server/execute.js";
 import { timeoutFetch } from "../server/timeout-fetch.js";
 import { parseAllowedHosts } from "../server/hosts.js";
-import { MAX_REPORT_BYTES, MAX_REPORT_FILES, createWorker } from "../server/worker.js";
+import { MAX_REPORT_BYTES, MAX_REPORT_FILES, createWorker, summarizeRun } from "../server/worker.js";
 import { workerDb } from "../server/worker-db.js";
 import { clearFolders, handle } from "../server/report-child.js";
 import { WORKER_TOKEN, fakeSupabase } from "./helpers/fake-supabase.js";
@@ -324,7 +324,11 @@ describe("worker, with a fake run process", () => {
     const saved = fake.run(run.id);
     assert.equal(saved.status, "done");
     assert.deepEqual(saved.summary.files, ["b.md"]);
-    assert.deepEqual(saved.summary.skipped_files.sort(), [".hidden.md", "a.md", `${"x".repeat(198)}.md`].sort());
+    const [hidden, refused, long] = saved.summary.skipped_files.sort();
+    assert.deepEqual([hidden, refused], [".hidden.md", "a.md"]);
+    // The too-long name is named, cut in the middle to 200 characters, so its extension shows.
+    assert.equal(long.length, 200);
+    assert.match(long, /^x+…x+\.md$/);
     assert.ok(logged.some((line) => /left out a\.md \(worker_save_report: A run keeps at most 20 MiB/.test(line)), logged.join("\n"));
     assert.equal(fake.tables.run_results.length, 1, "the results are kept");
   });
@@ -611,14 +615,30 @@ describe("worker, with a fake run process", () => {
       const countingDb = { ...db, saveReport: async (...args) => ((calls += 1), db.saveReport(...args)) };
       const names = Array.from({ length: MAX_REPORT_FILES + 30 }, (_, i) => `r${String(i).padStart(3, "0")}.md`);
       const requests = [];
-      const { execute } = withFolder(files(...names));
+      // zz.bin is left out on its own (not a report type), and named before the files left out
+      // in bulk, though it sorts after them (R5.1).
+      const { execute } = withFolder(files(...names, "zz.bin"));
       await createWorker({ db: countingDb, catalog, config: own(), execute, lookup, log: quiet, stopProcesses: async () => {}, startChild: fakeChild(requests), exit: () => {} }).tick();
       assert.equal(fake.run(run.id).status, "done");
       assert.equal(calls, MAX_REPORT_FILES);
       assert.equal(requests.filter((r) => r.op === "read").length, MAX_REPORT_FILES, "nor the child");
       const { summary } = fake.run(run.id);
-      assert.equal(summary.skipped_count, 30);
+      assert.equal(summary.skipped_count, 31);
       assert.equal(summary.skipped_files.length, 20, "named up to 20, counted in full");
+      assert.equal(summary.skipped_files[0], "zz.bin");
+    });
+
+    it("logs each file left out one by one only up to a limit, then counts them (R5.1)", async () => {
+      const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+      const fake = fakeSupabase({ runs: [run] });
+      const lines = [];
+      const { execute } = withFolder(files(...Array.from({ length: 50 }, (_, i) => `x${i}.bin`)));
+      await createWorker({ db: dbOf(fake), catalog, config: own(), execute, lookup, log: { log: (m) => lines.push(m), error() {} }, stopProcesses: async () => {}, startChild: fakeChild([]), exit: () => {} }).tick();
+      assert.equal(fake.run(run.id).status, "done");
+      const leftOut = lines.filter((m) => m.includes("left out"));
+      assert.equal(leftOut.length, 31, leftOut.slice(-3).join("\n"));
+      assert.match(leftOut.at(-1), /left out 20 more files/);
+      assert.equal(fake.run(run.id).summary.skipped_count, 50);
     });
 
     it("stops asking the database once it refuses a file for the cap on files (R4.1)", async () => {
@@ -821,6 +841,46 @@ describe("worker, with a fake run process", () => {
     await worker.stop();
     assert.ok(claims >= 2, `polled ${claims} times`);
     assert.match(errors[0], /worker_fail_stale_runs: upstream unavailable/);
+  });
+});
+
+describe("a run's summary fits the database's 64 KiB check (R5.1)", () => {
+  const outcome = (blocked = []) => ({ results: [], blocked, outcome: "done" });
+  const bytes = (summary) => Buffer.byteLength(JSON.stringify(summary));
+  // jsonb's text adds a space after each comma and colon; the summary leaves room for that.
+  const asJsonb = (summary) => bytes(summary) + (JSON.stringify(summary).match(/[,:]/g) ?? []).length;
+
+  it("cuts long names, and names 20 of them, counting all", () => {
+    const skipped = Array.from({ length: 25 }, (_, i) => `${i}`.padEnd(4096, "a"));
+    const summary = summarizeRun(outcome(), [], skipped);
+    assert.equal(summary.skipped_count, 25);
+    assert.equal(summary.skipped_files.length, 20);
+    assert.ok(summary.skipped_files.every((name) => name.length <= 200));
+    assert.ok(asJsonb(summary) <= 65536);
+  });
+
+  it("cuts by code point, so no half of an emoji is left for jsonb to refuse", () => {
+    const skipped = Array.from({ length: 3 }, (_, i) => `${i}${"\u{1F600}".repeat(2000)}`);
+    const blocked = [`${"\u{1F600}".repeat(400)}.example:443 (private)`];
+    const summary = summarizeRun(outcome(blocked), [], skipped);
+    for (const text of [...summary.skipped_files, ...summary.blocked_requests]) {
+      assert.ok(text.isWellFormed(), "no lone surrogate");
+      assert.ok(Array.from(text).length <= 300);
+    }
+    assert.ok(JSON.stringify(summary).indexOf("\\ud") === -1, "no escaped surrogate in the JSON");
+  });
+
+  it("fits with the most files the database keeps, names of control characters, and huge blocked entries", () => {
+    const files = Array.from({ length: 200 }, (_, i) => `${i}`.padEnd(200, "f"));
+    const skipped = Array.from({ length: 25 }, (_, i) => `${i}`.padEnd(3771, "\u0001"));
+    const blocked = Array.from({ length: 60 }, (_, i) => `${i}`.padEnd(19000, "\u0001"));
+    const summary = summarizeRun(outcome(blocked), files, skipped);
+    assert.ok(asJsonb(summary) <= 65536, `${asJsonb(summary)} bytes`);
+    assert.equal(summary.files.length, 200, "every kept file is still listed, for its download");
+    assert.equal(summary.skipped_count, 25);
+    assert.ok(summary.skipped_files.length >= 1, "at least one left-out file is still named");
+    assert.ok(summary.blocked_requests.length >= 1, "and some blocked requests, each cut");
+    assert.ok(summary.blocked_requests.every((entry) => entry.length <= 300));
   });
 });
 

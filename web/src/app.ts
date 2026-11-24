@@ -581,7 +581,7 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
       skipped.length
         ? [
             h('h2', {}, 'Files not kept'),
-            h('p', {}, 'These files were not kept: too large, too many, or a name or type a report cannot have.'),
+            h('p', {}, 'These files were not kept: too large, too many, a name or type a report cannot have, or saving took too long.'),
             h('ul', {}, skipped.map((path) => h('li', {}, path))),
             unnamed ? h('p', {}, `And ${unnamed} more.`) : null,
           ]

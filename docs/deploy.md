@@ -274,8 +274,10 @@ domain only you control, where you can.
     most 200 report files and 20 MiB of reports, of at most 2 MiB each.
   - A file is left out if it is a link or another non-file, is over 2 MiB, has a name the
     database does not take, or is refused by the database (a cap, a check, or text it cannot
-    hold). The run's summary lists it under `skipped_files`, and the run still finishes. Any
-    other error while saving fails the run. NUL characters in a report become U+FFFD.
+    hold), or once the save is full or has taken too long. The run's summary counts every such
+    file (`skipped_count`) and names up to 20 (`skipped_files`, each cut to 200 characters, those
+    left out one by one first), and the run still finishes. Any other error while saving fails
+    the run. NUL characters in a report become U+FFFD.
 - **Retention** (PManager's decision, 23 November 2026; the privacy note on the page says so):
   - each person keeps their 20 latest runs; queueing a new one deletes their oldest finished
     runs beyond that;
