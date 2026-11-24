@@ -1041,6 +1041,7 @@ describe("a run's summary fits the database's 64 KiB check (R5.1)", () => {
     const blocked = Array.from({ length: 60 }, (_, i) => `${i}`.padEnd(19000, "\u0001"));
     const summary = summarizeRun(outcome(blocked), files, skipped);
     assert.ok(asJsonb(summary) <= 65536, `${asJsonb(summary)} bytes`);
+    assert.ok(bytes(summary) <= 48 * 1024, `within the 48 KiB budget, which leaves room for jsonb's spacing: ${bytes(summary)} bytes (R6.1)`);
     assert.equal(summary.files.length, 200, "every kept file is still listed, for its download");
     assert.equal(summary.skipped_count, 25);
     assert.ok(summary.skipped_files.length >= 1, "at least one left-out file is still named");
