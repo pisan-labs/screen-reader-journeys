@@ -364,6 +364,20 @@ describe("worker, with a fake run process", () => {
     assert.equal(worker.progressOf(run.id), null, "forgotten once the run has ended");
   });
 
+  it("does not say the reports are being saved for a run put back in the queue (R21.1-7)", async () => {
+    const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+    const fake = fakeSupabase({ runs: [run] });
+    const db = dbOf(fake);
+    let worker;
+    let requeuing;
+    const execute = async () => ({ outcome: "aborted", error: null, results: [], blocked: [] });
+    const watching = { ...db, requeue: async (...args) => ((requeuing = worker.progressOf(run.id)), db.requeue(...args)) };
+    worker = createWorker({ db: watching, catalog, config, execute, lookup, log: quiet });
+    await worker.tick();
+    assert.ok(requeuing, "the progress was still there while it was requeued");
+    assert.equal(requeuing.phase, "running");
+  });
+
   it("names no journey between a result and the next start, says when the reports are saved, and times the run on its own clock (R19.1-4 to -6)", async () => {
     const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC], modes: ["walker", "virtual"] });
     const fake = fakeSupabase({ runs: [run] });
@@ -1136,7 +1150,10 @@ describe("a run's refused requests in its summary (R6.3)", () => {
     assert.equal(one.blocked_count, undefined, "all are shown");
     const many = Array.from({ length: 80 }, (_, i) => `h${i}.example:443 (private)`);
     const lots = summarizeRun({ results: [], blocked: many, outcome: "done" }, [], []);
-    assert.deepEqual([lots.blocked_requests.length, lots.blocked_count], [50, 80]);
+    assert.deepEqual([lots.blocked_requests.length, lots.blocked_count, lots.blocked_more], [50, 80, undefined]);
+    // The server left some out past its cap: the count is a floor, and says so (R21.1-4).
+    const capped = summarizeRun({ results: [], blocked: many, outcome: "done", blockedMore: true }, [], []);
+    assert.deepEqual([capped.blocked_count, capped.blocked_more], [80, true]);
     // Entries the size guard drops are counted too.
     const big = Array.from({ length: 50 }, (_, i) => `${i}${"z".repeat(2000)}`);
     const guarded = summarizeRun({ results: [], blocked: big, outcome: "done" }, Array.from({ length: 200 }, (_, i) => `${"f".repeat(190)}${i}.md`), []);
@@ -1310,6 +1327,9 @@ process.stdin.on("end", () => {
     assert.equal(outcome.blocked.length, MAX_BLOCKED + 1);
     assert.deepEqual(outcome.blocked.slice(0, MAX_BLOCKED), [...batch(0), ...batch(100)], "the first different ones, each once");
     assert.deepEqual(outcome.blocked.filter((e) => e.startsWith("all connections")), [limit(100)]);
+    assert.equal(outcome.blockedMore, true, "and says it left some out (R21.1-4)");
+    const few = await probe([{ type: "blocked", blocked: batch(0) }, { type: "done" }]);
+    assert.equal(few.blockedMore, undefined);
   });
 
   it("passes on where the run is: a journey and mode starting, its steps, each result", async () => {
@@ -1344,6 +1364,26 @@ process.stdin.on("end", () => {
       assert.deepEqual([outcome.outcome, outcome.error, outcome.events], ["error", "The run process sent a malformed message.", []]);
     });
   }
+
+  it("passes on each journey and mode's first step, however soon after the last one (R21.1-2)", async () => {
+    const times = [0, 200];
+    const messages = [
+      { type: "progress", journey: good.journey, mode: "walker" },
+      { type: "progress", journey: good.journey, mode: "walker", step: "w1", n: 1 },
+      { type: "progress", journey: good.journey, mode: "virtual" },
+      { type: "progress", journey: good.journey, mode: "virtual", step: "v1", n: 1 },
+      { type: "done" },
+    ];
+    const outcome = await probe(messages, { now: () => times.shift() ?? 10_000 });
+    assert.deepEqual(outcome.events.filter((e) => e.kind === "step").map((e) => e.step), ["w1", "v1"]);
+  });
+
+  it("allows a longer run more progress messages (R21.1-3)", async () => {
+    const { progressLimit } = await import("../server/execute.js");
+    assert.equal(progressLimit(900_000, 12), MAX_PROGRESS, "15 minutes: the floor");
+    assert.equal(progressLimit(undefined, 2), MAX_PROGRESS);
+    assert.equal(progressLimit(5_000_000, 12), 2 * (5000 + 24), "twice what run-child can send in that time");
+  });
 
   it("ends a run that sends more than MAX_PROGRESS progress messages, and passes on steps at most one each STEP_EVERY_MS (R19.1-2)", async () => {
     const start = { type: "progress", journey: good.journey, mode: "walker" };

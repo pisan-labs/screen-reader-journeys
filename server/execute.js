@@ -42,11 +42,14 @@ export function isResult(r) {
 export const MAX_BLOCKED = 200;
 
 /**
- * The most progress messages one run may send; past it, the run is malformed. run-child.js sends
- * one as each journey and mode starts and at most one step a second, so a 15-minute run sends
- * fewer than 2000 (R19.1-2).
+ * The fewest progress messages one run may send before it is malformed. run-child.js sends one as
+ * each journey and mode starts and at most one step a second, so a 15-minute run sends fewer
+ * than 2000 (R19.1-2). A longer run may send more: see progressLimit (R21.1-3).
  */
 export const MAX_PROGRESS = 5000;
+
+/** For a run of `timeoutMs` with `pairs` journeys and modes: twice what run-child can send. */
+export const progressLimit = (timeoutMs, pairs) => Math.max(MAX_PROGRESS, 2 * (Math.ceil((timeoutMs || 0) / 1000) + 2 * pairs));
 
 /** Steps that come sooner than this after the last one passed on are not passed on (R19.1-2). */
 export const STEP_EVERY_MS = 500;
@@ -201,14 +204,19 @@ export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs =
     const results = [];
     const blocked = [];
     // Each refusal once, at most MAX_BLOCKED of them and one byte-limit entry (R20.1-1).
+    // `blockedMore` says some were left out past the cap, so the count is a floor (R21.1-4).
     const seen = new Set();
     let byteLimit = false;
+    let blockedMore = false;
     const keep = (/** @type {string[]} */ refused) => {
       for (const entry of refused) {
         if (entry.startsWith(BYTE_LIMIT_ENTRY)) {
           if (byteLimit) continue;
           byteLimit = true;
-        } else if (seen.size >= MAX_BLOCKED || seen.has(entry)) {
+        } else if (seen.has(entry)) {
+          continue;
+        } else if (seen.size >= MAX_BLOCKED) {
+          blockedMore = true;
           continue;
         } else {
           seen.add(entry);
@@ -260,7 +268,7 @@ export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs =
       close();
       clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
-      resolve({ outcome, error, results, blocked });
+      resolve({ outcome, error, results, blocked, ...(blockedMore ? { blockedMore } : {}) });
     };
 
     const malformed = () => {
@@ -290,11 +298,15 @@ export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs =
         // Where the run is: for one of the job's journeys and modes, not yet finished; a step is
         // short text and a count. Nothing else is passed on, steps at most one each STEP_EVERY_MS,
         // and a run that sends more than MAX_PROGRESS of these is malformed (R19.1-1, R19.1-2).
-        if (++progressed > MAX_PROGRESS) return malformed();
+        if (++progressed > progressLimit(timeoutMs, expected.size)) return malformed();
         if (!isText(message.journey, 500) || !isText(message.mode, 50)) return malformed();
         const key = `${message.journey}\n${message.mode}`;
         if (!expected.has(key) || taken.has(key)) return malformed();
-        if (message.step === undefined) return onEvent({ kind: "start", journey: message.journey, mode: message.mode });
+        if (message.step === undefined) {
+          // Each journey and mode's first step is passed on, however soon it comes (R21.1-2).
+          stepAt = -Infinity;
+          return onEvent({ kind: "start", journey: message.journey, mode: message.mode });
+        }
         if (!isText(message.step, 200) || !isCount(message.n)) return malformed();
         const at = now();
         if (at - stepAt < STEP_EVERY_MS) return;

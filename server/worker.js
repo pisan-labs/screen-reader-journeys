@@ -115,7 +115,7 @@ const short = (text, max = 500) => {
   return points.length > max ? `${points.slice(0, max - 1).join("")}…` : points.join("");
 };
 
-export function summarizeRun({ results, blocked, outcome }, files, skipped = []) {
+export function summarizeRun({ results, blocked, outcome, blockedMore = false }, files, skipped = []) {
   const refused = [...new Set([...blocked.filter(isByteLimit), ...blocked].map((entry) => cut(entry, BLOCKED_CHARS)))];
   /** @type {Record<string, any>} */
   const summary = {
@@ -141,7 +141,9 @@ export function summarizeRun({ results, blocked, outcome }, files, skipped = [])
   while (size() > SUMMARY_BYTES && summary.blocked_requests.length) summary.blocked_requests.pop();
   while (size() > SUMMARY_BYTES && named.length) named.pop();
   // How many there were, when the page shows fewer (R6.3).
-  if (refused.length > summary.blocked_requests.length) summary.blocked_count = refused.length;
+  if (refused.length > summary.blocked_requests.length || blockedMore) summary.blocked_count = refused.length;
+  // The server kept at most 200 (execute.js, MAX_BLOCKED): there were more than the count says.
+  if (blockedMore) summary.blocked_more = true;
   return summary;
 }
 
@@ -500,9 +502,6 @@ export function createWorker({
         }
       };
       const outcome = await execute(job, { timeoutMs: config.runTimeoutMs, signal: current.signal, runAs, log, onEvent });
-      // The run still reads "running" while its reports are saved: say so, keeping what it did
-      // (R19.1-5). The progress goes when the run is finished, failed or requeued (finally).
-      Object.assign(live, { phase: "saving", journey: null, mode: null, step: null, n: null });
       if (outcome.blocked.some(isByteLimit)) log.log(`run ${run.id}: the network guard's byte limit closed its connections`);
       if (outcome.outcome === "aborted") {
         // The server is shutting down (a deploy, say): put the run back for the next instance.
@@ -510,6 +509,10 @@ export function createWorker({
         log.log(`run ${run.id}: requeued`);
         return;
       }
+      // The run still reads "running" while its reports are saved: say so, keeping what it did
+      // (R19.1-5); not for a run being put back in the queue (R21.1-7). The progress goes when
+      // the run is finished, failed or requeued (finally).
+      Object.assign(live, { phase: "saving", journey: null, mode: null, step: null, n: null });
       // Nothing may write into the folder while it is read, and it must be the folder made for it.
       await stopOrMark();
       await checkReportsFolder(dirs.reports);

@@ -238,7 +238,9 @@ Then in the dashboard:
     too. CI runs coverage as an ordinary user and then, as root, the root-only tests of
     `test/server-reports.test.js` and `test/server-worker.test.js`, which coverage does not count.
     Run as root, `test/server-index.test.js` starts the server as `nobody`, and skips those tests,
-    saying why, when `nobody` cannot read the checkout (one under `/root`, say);
+    saying why, when `nobody` cannot read the checkout (one under `/root`, say). Run one suite at
+    a time on a machine: the root-only tests stop every process of the run's user, so two suites
+    at once (two worktrees, or a reviewer's mutations beside a coverage run) fail each other's;
   - in `web/`, for the dashboard: `npm run lint`, `npm run typecheck`, `npm run coverage` (at
     least 85%, under jsdom with fakes) and `npm run build`.
 - **`npm run test:sql`** applies the migrations twice to a throwaway local PostgreSQL, on a stub of
@@ -312,8 +314,9 @@ where you can.
   ("Running 2 of 4: …"), the results so far, the step, and the time against the time limit. The
   worker holds this in memory, from the run process's checked messages (a "progress" message
   when a journey and mode starts, and its step at most once a second; the worker passes on at
-  most one step each half second, and a run that sends more than 5000 progress messages ends as
-  malformed), and the API serves it to the run's owner only (`GET /runs/:id/progress`, which
+  most one step each half second, resetting at each journey and mode, and a run that sends more
+  than 5000 progress messages, or for a run longer than 40 minutes twice what it could send, ends
+  as malformed), and the API serves it to the run's owner only (`GET /runs/:id/progress`, which
   reads the run through the person's own client first). Between a result and the next start it
   names no journey ("starting"), and while the reports are saved it says so, keeping the results.
   The time is the server's own (`elapsed_s`), so the visitor's clock does not matter. Nothing is
@@ -342,8 +345,10 @@ where you can.
     cannot be loaded), and the server logs one line. A run stopped because the server is
     shutting down (a deploy) is put back in the queue and starts again, so its summary is the new
     run's. After a stop, no new journey or mode starts, and a result the stop cut short is not
-    counted. A run may also look up at most 500 host names, each once (a lookup that fails is
-    tried again, and counted again).
+    counted. A run may also look up at most 500 host names, each counted once. A lookup that fails
+    for a reason that may pass (a busy resolver) is tried again, at most 4 times in all; one that
+    finds no such host is kept, so a page that keeps asking for a dead host costs one lookup.
+    Each refusal entry is cut to 2000 characters in the middle, so its reason shows.
   - Per run: one result for each of the run's journeys and modes (a unique constraint), and at
     most 200 report files and 20 MiB of reports, of at most 2 MiB each.
   - A file is left out if it is a link or another non-file, is over 2 MiB, has a name the
@@ -364,7 +369,9 @@ where you can.
   stored with the run (`summary.blocked_requests`) and shown on the run page. The server keeps
   at most 200 different ones a run, plus the byte limit's; the summary shows the first 50, the
   byte limit's first, each cut to 300 characters and each once as cut, and when it shows fewer
-  than there were, it counts them all (`summary.blocked_count`, "And N more." on the page).
+  than there were, it counts them (`summary.blocked_count`, "And N more." on the page). When the
+  server left some out past its 200, that count is a floor (`summary.blocked_more`, "And at least
+  N more.").
 
 ## Security
 

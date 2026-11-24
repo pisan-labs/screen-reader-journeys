@@ -78,6 +78,8 @@ export interface RunSummary {
   blocked_requests?: string[];
   /** How many refused requests there were, when blocked_requests shows fewer. */
   blocked_count?: number;
+  /** The server left some out past its cap: blocked_count is a floor. */
+  blocked_more?: boolean;
 }
 export interface RunResult {
   journey: string;
@@ -626,7 +628,7 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
             h('h2', {}, 'Blocked requests'),
             h('p', {}, "The server's network guard stopped the page from reaching these addresses. A journey that needs one may have failed because of it."),
             h('ul', {}, blocked.map((b) => h('li', { class: 'url' }, b))),
-            moreBlocked ? h('p', {}, `And ${moreBlocked} more.`) : null,
+            moreBlocked || run.summary?.blocked_more ? h('p', {}, `And ${run.summary?.blocked_more ? 'at least ' : ''}${moreBlocked} more.`) : null,
           ]
         : null,
       waiting ? null : [h('h2', {}, 'Delete'), h('p', {}, deleteButton(run))],
@@ -663,6 +665,7 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
     const mine = generation;
     const current = () => generation === mine;
     let shown: string | null = null;
+    let lastStatus: string | null = null;
     let saidProgress: string | null = null;
 
     /**
@@ -670,16 +673,18 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
      * Resolves to whether it said something.
      */
     async function showProgress(run: Run): Promise<boolean> {
-      let p: Progress | null = null;
+      // undefined: the request failed, and what is shown stays; null: the server has no progress.
+      let p: Progress | null | undefined = null;
       if (run.status === 'running') {
         p = await api<{ progress: Progress | null }>(`/runs/${encodeURIComponent(run.id)}/progress`)
           .then((r) => r.progress)
-          .catch(() => null);
+          .catch(() => undefined);
       }
-      if (!current()) return false;
+      if (!current() || p === undefined) return false;
       if (!p) {
         progressBox.replaceChildren();
-        // A run requeued and started again says its progress again (R19.1-8).
+        // A run requeued and started again says its progress again (R19.1-8); a failed request
+        // does not count as that (R21.1-5).
         saidProgress = null;
         return false;
       }
@@ -715,7 +720,9 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
       }
       if (!current()) return;
       const key = `${run.status}|${run.run_results?.length ?? 0}`;
-      const nowRunning = shown !== null && key !== shown && run.status === 'running';
+      // Only the change from waiting to running, not a later result while it runs (R21.1-5).
+      const nowRunning = lastStatus !== null && lastStatus !== 'running' && run.status === 'running';
+      lastStatus = run.status;
       if (key !== shown) {
         const list = await loadCatalog().catch(() => null);
         let available = new Set<string>();

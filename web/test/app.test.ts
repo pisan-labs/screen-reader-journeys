@@ -37,7 +37,8 @@ function run(fields: Partial<Run> = {}): Run {
   };
 }
 
-type Answer = { status: number; body?: unknown } | Error;
+/** `wait`: the answer comes once it settles. */
+type Answer = { status: number; body?: unknown; wait?: Promise<unknown> } | Error;
 
 /** A fake supabase-js client for the two tables, recording what was asked. */
 function fakeClient({ runs = [] as Run[], runsError = null as string | null, reportsError = null as string | null, deleteError = null as string | null } = {}) {
@@ -110,6 +111,7 @@ async function setup({ session = SESSION, answers = {}, client = fakeClient(), h
     if (Array.isArray(answer)) answer = answer.length > 1 ? answer.shift()! : answer[0];
     if (!answer) answer = { status: 404, body: { error: 'Not found.' } };
     if (answer instanceof Error) throw answer;
+    if (answer.wait) await answer.wait;
     const { status, body: payload } = answer;
     return new Response(payload === undefined ? 'not json' : JSON.stringify(payload), { status });
   });
@@ -362,6 +364,13 @@ describe('the dashboard', () => {
     expect(view().textContent).toMatch(/Files not kept.*too large, too many, a name or type a report cannot have, or saving took too long.*huge\.json.*And 2 more\./);
     expect(view().textContent).toMatch(/Blocked requests.*10\.0\.0\.1:80.*And 3 more\./);
     expect(view().textContent).toMatch(/2 of 2.*1 error, 0 warnings/);
+  });
+
+  it('says "And at least N more." when the server left refused requests out past its cap (R21.1-4)', async () => {
+    const summary = { passed: 1, files: ['summary.md'], blocked_requests: ['10.0.0.1:80 (private)'], blocked_count: 201, blocked_more: true };
+    await setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': { status: 200, body: CATALOG }, [`GET /runs/${RUN_ID}`]: { status: 200, body: { run: run({ summary }) } } } });
+    await until(() => view().textContent?.includes('Blocked requests') ?? false, 'the run');
+    expect(view().textContent).toMatch(/And at least 200 more\./);
   });
 
   it('fetches a report only when asked, and saves it as a download, never as a page', async () => {
@@ -633,6 +642,55 @@ describe('progress while a run is going (the owner: "The run is running." says t
       expect(seen).toEqual([said]);
     });
   }
+
+  it('says "The run is running." once, not again for each result while it runs (R21.1-5)', async () => {
+    const queued = { status: 200, body: { run: run({ status: 'queued', summary: null, run_results: [], started_at: null, finished_at: null }) } };
+    const withResult = { status: 200, body: { run: run({ status: 'running', summary: null, finished_at: null }) } };
+    const ui = setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': { status: 200, body: CATALOG }, [`GET /runs/${RUN_ID}`]: [queued, ...Array.from({ length: 20 }, () => running), withResult], [`GET /runs/${RUN_ID}/progress`]: { status: 200, body: { progress: null } } } });
+    const seen = announcements();
+    const { requests } = await ui;
+    // The result comes 20 polls after the start, well after its announcement has landed (50 ms).
+    await until(() => requests.filter((r) => r.path === `/runs/${RUN_ID}`).length >= 45, 'polls past the result');
+    expect(seen).toEqual(['The run is running.']);
+  });
+
+  it('does not say the progress again after a failed request (R21.1-5)', async () => {
+    const said = { status: 200, body: { progress: progress() } };
+    const ui = setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': { status: 200, body: CATALOG }, [`GET /runs/${RUN_ID}`]: running, [`GET /runs/${RUN_ID}/progress`]: [
+      ...Array.from({ length: 20 }, () => said),
+      ...Array.from({ length: 5 }, () => ({ status: 502, body: { error: 'down' } })),
+      said,
+    ] } });
+    const seen = announcements();
+    const { requests } = await ui;
+    await until(() => requests.filter((r) => r.path.endsWith('/progress')).length >= 40, 'polls past the failures');
+    expect(seen).toEqual(['Running 2 of 4: Home page: Tab order, Keyboard walker. So far: 1 passed, 0 failed, 0 errors.']);
+  });
+
+  it('says nothing for a run page left while the journeys were still loading (R21.1-5)', async () => {
+    let release = () => {};
+    const wait = new Promise((resolve) => (release = () => resolve(undefined)));
+    // The first view draws its progress without the catalog (two failed requests), then a later
+    // poll asks for the catalog again, and that request is held while the page is left. Each
+    // request takes one answer off the front while more than one is left.
+    const down = { status: 500, body: { error: 'down' } };
+    const catalog: Answer[] = [down, down, { status: 200, body: CATALOG, wait }, { status: 200, body: CATALOG }];
+    const ui = setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': catalog, [`GET /runs/${RUN_ID}`]: running, [`GET /runs/${RUN_ID}/progress`]: { status: 200, body: { progress: progress() } } } });
+    const seen = announcements();
+    await ui;
+    await until(() => catalog.length === 1, 'the held catalog request');
+    const box = document.getElementById('progress')!;
+    const before = box.textContent;
+    expect(before).toMatch(/Running 2 of 4: targets\/generic\/home-tab-order\.journey\.js/);
+    window.location.hash = '#/';
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    release();
+    // Both pages wait on that one catalog request, the old one first: once the runs page shows the
+    // catalog's journeys, the old page has had its turn.
+    await until(() => view().textContent?.includes('Home page: Tab order') ?? false, 'the runs page with the catalog');
+    expect(box.textContent, 'the page left behind is not drawn on').toBe(before);
+    expect(seen.filter((t) => t.includes('Home page: Tab order'))).toEqual([]);
+  });
 
   it('says the progress again after it went away (a requeued run starting again) (R19.1-8)', async () => {
     const ui = setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': { status: 200, body: CATALOG }, [`GET /runs/${RUN_ID}`]: running, [`GET /runs/${RUN_ID}/progress`]: [

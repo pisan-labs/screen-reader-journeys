@@ -25,6 +25,12 @@ import { resolveEgress, systemLookup } from "./hosts.js";
 const MAX_BLOCKED_PER_SEND = 50;
 export const MAX_BYTES = 100 * 1024 * 1024;
 export const MAX_NAMES = 500;
+/** How often one host name is looked up in a run when its lookups fail for a passing reason. */
+export const MAX_TRIES = 4;
+/** DNS failures that may pass (a busy resolver, a timeout): such a host is tried again. */
+const PASSING = new Set(["EAI_AGAIN", "ETIMEOUT", "ETIMEDOUT", "ECONNREFUSED", "ESERVFAIL"]);
+/** The longest refusal entry, cut in the middle so its reason shows (R21.1-6). */
+const ENTRY_CHARS = 2000;
 /** The start of the entry that says a run reached MAX_BYTES; summaries keep it first. */
 export const BYTE_LIMIT_ENTRY = "all connections (byte limit:";
 const HOP_BY_HOP = new Set(["connection", "keep-alive", "proxy-connection", "proxy-authorization", "proxy-authenticate", "te", "trailer", "transfer-encoding", "upgrade"]);
@@ -46,23 +52,29 @@ export async function startEgressProxy({ rules, lookup = systemLookup, idleMs = 
   const seen = new Set();
   // Each host name is looked up once a run, and at most `maxNames` of them: a page cannot make
   // the server send DNS queries for names it chooses without end.
-  // A lookup that fails (a DNS hiccup, say) is not kept, so the host is tried again later, but it
-  // still counts toward `maxNames` (R9.4).
+  // Each name counts once toward `maxNames`. A lookup that fails for a passing reason (a busy
+  // resolver) is not kept, so the host is tried again, at most MAX_TRIES times in all (R9.4);
+  // any other failure (no such host) is kept, so a page that keeps asking for a dead host costs
+  // one lookup, not one per request (R21.1-1).
   const names = new Map();
-  let lookedUp = 0;
+  const tries = new Map();
   const lookupOnce = (host) => {
     if (!names.has(host)) {
-      if (lookedUp >= maxNames) return Promise.reject(new Error(`more than ${maxNames} host names in this run`));
-      lookedUp += 1;
+      if (!tries.has(host) && tries.size >= maxNames) return Promise.reject(new Error(`more than ${maxNames} host names in this run`));
+      const tried = (tries.get(host) ?? 0) + 1;
+      tries.set(host, tried);
       const answer = lookup(host);
       names.set(host, answer);
-      answer.catch(() => names.get(host) === answer && names.delete(host));
+      answer.catch((error) => {
+        if (PASSING.has(error?.code) && tried < MAX_TRIES && names.get(host) === answer) names.delete(host);
+      });
     }
     return names.get(host);
   };
   const decide = async (host, port) => {
     const decision = await resolveEgress(host, port, rules, lookupOnce);
-    const entry = `${host}:${port} (${decision.reason})`;
+    const whole = `${host}:${port} (${decision.reason})`;
+    const entry = whole.length > ENTRY_CHARS ? `${whole.slice(0, ENTRY_CHARS - 501)}…${whole.slice(-500)}` : whole;
     if (!decision.ok && blocked.length < MAX_BLOCKED_PER_SEND && !seen.has(entry)) {
       seen.add(entry);
       blocked.push(entry);
