@@ -50,8 +50,8 @@ select test.check(
   'every table has row level security, none forced');
 select test.check(
   (select count(*) from pg_class c
-    where c.relnamespace = 'app_screen_reader_journeys'::regnamespace and c.relkind = 'r') = 5,
-  'five tables');
+    where c.relnamespace = 'app_screen_reader_journeys'::regnamespace and c.relkind = 'r') = 6,
+  'six tables');
 select test.check(
   not exists (select 1 from pg_class c
     where c.relnamespace = 'app_screen_reader_journeys'::regnamespace and c.relkind = 'r'
@@ -378,6 +378,47 @@ insert into runs (base_url, journeys, modes) values ('https://f-tomorrow.vercel.
 commit;
 select test.check((select runs from run_counts where user_id = '00000000-0000-4000-8000-00000000000f' and day = (now() at time zone 'utc')::date) = 1, 'today starts at one');
 select test.check((select count(*) from run_counts where user_id = '00000000-0000-4000-8000-00000000000f') = 2, 'today and yesterday are kept, older days go');
+
+\echo 'old counts go for everyone, not only for the person starting a run (R7.4)'
+insert into run_counts (user_id, day, runs) values ('00000000-0000-4000-8000-000000000010', (now() at time zone 'utc')::date - 4, 2);
+insert into run_totals (day, runs) values ((now() at time zone 'utc')::date - 4, 7);
+begin;
+select test.act_as('authenticated', '00000000-0000-4000-8000-00000000000f');
+insert into runs (base_url, journeys, modes) values ('https://f-cleanup.vercel.app/', '{x}', '{walker}');
+commit;
+select test.check(not exists (select 1 from run_counts where day < (now() at time zone 'utc')::date - 1), 'G''s old count went, though G started nothing');
+select test.check(not exists (select 1 from run_totals where day < (now() at time zone 'utc')::date - 1), 'old totals went');
+select test.check((select provolatile from pg_proc where proname = 'daily_run_limit') = 's', 'daily_run_limit() is stable, meant to be replaced');
+update runs set status = 'done' where status = 'queued';
+
+\echo 'at most 40 runs a day in all, which deleting an account does not lower (R7.3)'
+select test.check(daily_total_limit() = 40, 'the total is 40, in one function');
+insert into auth.users (id, email) values
+  ('00000000-0000-4000-8000-000000000011', 'h@example.org'),
+  ('00000000-0000-4000-8000-000000000012', 'i@example.org');
+-- Everyone has started 39 runs today.
+update run_totals set runs = 39 where day = (now() at time zone 'utc')::date;
+begin;
+select test.act_as('authenticated', '00000000-0000-4000-8000-000000000011');
+insert into runs (base_url, journeys, modes) values ('https://h1.vercel.app/', '{x}', '{walker}');
+commit;
+select test.check((select runs from run_totals where day = (now() at time zone 'utc')::date) = 40, 'the 40th is counted');
+begin;
+select test.act_as('authenticated', '00000000-0000-4000-8000-000000000012');
+select test.fails($$insert into app_screen_reader_journeys.runs (base_url, journeys, modes) values ('https://i1.vercel.app/', '{x}', '{walker}')$$, 'has run its 40 runs for today \(UTC\)');
+commit;
+select test.check((select runs from run_totals where day = (now() at time zone 'utc')::date) = 40, 'the refused run is not counted in the total');
+select test.check(not exists (select 1 from run_counts where user_id = '00000000-0000-4000-8000-000000000012'), 'nor for the person');
+delete from auth.users where id = '00000000-0000-4000-8000-000000000011';
+select test.check((select runs from run_totals where day = (now() at time zone 'utc')::date) = 40, 'deleting an account does not lower the total');
+begin;
+select test.act_as('authenticated', '00000000-0000-4000-8000-000000000012');
+select test.fails($$select * from app_screen_reader_journeys.run_totals$$, 'permission denied');
+select test.fails($$update app_screen_reader_journeys.run_totals set runs = 1$$, 'permission denied');
+select test.fails($$select app_screen_reader_journeys.daily_total_limit()$$, 'permission denied');
+commit;
+-- The rest of the checks start runs again.
+delete from run_totals;
 
 \echo 'deleting an account deletes everything it owns'
 begin;
