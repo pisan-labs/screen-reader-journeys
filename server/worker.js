@@ -2,13 +2,14 @@
 // results. One run at a time. `db` is workerDb() from worker-db.js: the token-checked worker_*
 // functions, and nothing else (or a fake with the same methods, in the tests).
 
-import { chmod, chown, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { chmod, chown, lstat, mkdir, mkdtemp, rm, rmdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 import { findJourney } from "./catalog.js";
 import { executeRun } from "./execute.js";
 import { resolveEgress } from "./hosts.js";
-import { checkReportsFolder, listReportFiles, readReportFile, recordReportsFolder, stopUserProcesses } from "./reports.js";
+import { clearFolders } from "./report-child.js";
+import { checkReportsFolder, listReportFiles, readReportFile, recordReportsFolder, startReportChild, stopUserProcesses } from "./reports.js";
 import { validateRunRequest } from "./validate.js";
 
 /** A report larger than this is left out (the database refuses it); the summary says so. */
@@ -16,6 +17,20 @@ export const MAX_REPORT_BYTES = 2 * 1024 * 1024;
 
 /** The report paths the database takes (run_reports.path's check). */
 const REPORT_PATH = /^[A-Za-z0-9][A-Za-z0-9._-]*(\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/;
+
+/** How long reading all of a run's reports through the run user's child may take, in all. */
+export const READ_LIMIT_MS = 120 * 1000;
+
+/** A list of paths as the run user's child may answer it: relative, short, no "..", no NUL. */
+function pathList(value, what) {
+  if (!Array.isArray(value) || value.length > 100000) throw new Error(`report child: ${what} is not a list of paths`);
+  for (const path of value) {
+    if (typeof path !== "string" || path === "" || path.length > 4096 || path.includes("\0") || path.startsWith("/") || path.split("/").includes("..")) {
+      throw new Error(`report child: ${what} holds a path it may not: ${JSON.stringify(String(path).slice(0, 100))}`);
+    }
+  }
+  return value;
+}
 
 /** How often the worker deletes finished runs over 30 days old. */
 const PRUNE_EVERY_MS = 60 * 60 * 1000;
@@ -68,9 +83,23 @@ export function summarizeRun({ results, blocked, outcome }, files, skipped = [])
  *   lookup?: (host: string) => Promise<string[]>,
  *   log?: Pick<Console, "log" | "error">,
  *   stopProcesses?: (runAs: { uid: number, gid: number }) => Promise<unknown>,
+ *   exit?: (code: number) => void,
+ *   startChild?: typeof startReportChild,
+ *   readLimitMs?: number,
  * }} options
  */
-export function createWorker({ db, catalog, config, execute = executeRun, lookup, log = console, stopProcesses = (runAs) => stopUserProcesses(runAs.uid, { gid: runAs.gid }) }) {
+export function createWorker({
+  db,
+  catalog,
+  config,
+  execute = executeRun,
+  lookup,
+  log = console,
+  stopProcesses = (runAs) => stopUserProcesses(runAs.uid, { gid: runAs.gid }),
+  exit = (code) => process.exit(code),
+  startChild = startReportChild,
+  readLimitMs = READ_LIMIT_MS,
+}) {
   let stopping = false;
   let loop = null;
   let current = null; // AbortController of the run in progress
@@ -89,6 +118,47 @@ export function createWorker({ db, catalog, config, execute = executeRun, lookup
   }
 
   /**
+   * The run's files are read and deleted as the run's own user when there is one (RUN_AS_UID):
+   * in a child process, over IPC (report-child.js). Root never reads or deletes them itself, so
+   * whatever a process of that user might still do, these reach only what that user may.
+   * Without RUN_AS_UID there is no such boundary, and the same work runs here.
+   */
+  function reportAccess() {
+    if (!config.runAs) {
+      return {
+        list: (dir) => listReportFiles(dir),
+        read: (dir, path, options) => readReportFile(dir, path, MAX_REPORT_BYTES, options),
+        clear: (dirs) => clearFolders(dirs),
+        close() {},
+      };
+    }
+    const child = startChild(config.runAs);
+    // The child's answers are checked before anything is done with them.
+    return {
+      async list(dir) {
+        const value = await child.call({ op: "list", dir });
+        if (!value || typeof value !== "object") throw new Error("report child: the listing is not an object");
+        return { files: pathList(value.files, "the listing's files"), others: pathList(value.others, "the listing's other entries") };
+      },
+      async read(dir, path, options) {
+        const value = await child.call({ op: "read", dir, path, maxBytes: MAX_REPORT_BYTES, ...options });
+        if (value && typeof value.text === "string" && value.text.length <= MAX_REPORT_BYTES) return { text: value.text };
+        if (value && typeof value.refused === "string" && value.refused.length <= 200) return { refused: value.refused };
+        throw new Error(`report child: a malformed answer for ${path}`);
+      },
+      async clear(dirs) {
+        const value = await child.call({ op: "clear", dirs });
+        const left = Array.isArray(value?.left) ? value.left : null;
+        if (!left || !left.every((p) => typeof p === "string" && dirs.some((dir) => p === dir || p.startsWith(`${dir}/`)))) {
+          throw new Error("report child: a malformed answer to clear");
+        }
+        return { left };
+      },
+      close: () => child.close(),
+    };
+  }
+
+  /**
    * Save each report file the run wrote. Resolves to the saved paths and the ones left out. A
    * file the database refuses is left out, never a reason to fail a run that finished.
    *
@@ -98,13 +168,26 @@ export function createWorker({ db, catalog, config, execute = executeRun, lookup
    * than the limit. Its name is checked before it is sent.
    */
   async function saveReports(runId, dir, { realRoot, uid }) {
+    const access = reportAccess();
+    // One limit for the whole read, not only for each request: when it passes, the child is
+    // ended, its pending answer fails, and so does the run.
+    const limit = setTimeout(() => access.close(), readLimitMs);
+    try {
+      return await saveReportsWith(access, runId, dir, { realRoot, uid });
+    } finally {
+      clearTimeout(limit);
+      access.close();
+    }
+  }
+
+  async function saveReportsWith(access, runId, dir, { realRoot, uid }) {
     const saved = [];
     const skipped = [];
     const leaveOut = (file, why) => {
       skipped.push(file);
       log.log(`run ${runId}: left out ${file} (${why})`);
     };
-    const { files, others } = await listReportFiles(dir);
+    const { files, others } = await access.list(dir);
     for (const file of others) leaveOut(file, "a link or other non-file");
     for (const file of files) {
       const type = CONTENT_TYPES[extname(file)];
@@ -116,7 +199,7 @@ export function createWorker({ db, catalog, config, execute = executeRun, lookup
         leaveOut(file, "a name the database does not take");
         continue;
       }
-      const read = await readReportFile(dir, file, MAX_REPORT_BYTES, { realRoot, uid });
+      const read = await access.read(dir, file, { realRoot, uid });
       if ("refused" in read) {
         leaveOut(file, read.refused);
         continue;
@@ -176,12 +259,80 @@ export function createWorker({ db, catalog, config, execute = executeRun, lookup
     return { workDir, outDir, home, reports: await recordReportsFolder(outDir) };
   }
 
+  /**
+   * Remove a run's work folder. With RUN_AS_UID, the run user's child empties reports/ and home/,
+   * and root then removes the three folders one at a time with rmdir, which never follows a link
+   * and fails on a folder that is not empty. Resolves to false if anything is left: what the run
+   * left would stay in /tmp as that user's, for later runs to read, so the caller then ends the
+   * server (and with it the container, and /tmp).
+   */
+  async function removeWorkDir(runId, made, workDir) {
+    if (!config.runAs || !made) {
+      await rm(workDir, { recursive: true, force: true }).catch((error) => log.error(`run ${runId}: removing its folder: ${error.message}`));
+      return true;
+    }
+    let access = null;
+    try {
+      access = reportAccess();
+      const { left } = await access.clear([made.outDir, made.home]);
+      if (left.length) {
+        log.error(`run ${runId}: could not remove ${left.length} of its files`);
+        await lockAway(runId, made);
+        return false;
+      }
+    } catch (error) {
+      log.error(`run ${runId}: emptying its folders: ${error.message}`);
+      await lockAway(runId, made);
+      return false;
+    } finally {
+      access?.close();
+    }
+    let removed = true;
+    for (const dir of [made.outDir, made.home, workDir]) {
+      await rmdir(dir).catch((error) => {
+        removed = false;
+        log.error(`run ${runId}: removing ${dir}: ${error.code ?? error.message}`);
+      });
+    }
+    return removed;
+  }
+
+  /**
+   * What the run's child could not remove stays, but not as the run user's: root takes reports/
+   * and home/ (their parent is root's, so the run cannot have swapped them) and closes them to
+   * everyone else, so no later run can read what is left before the container is gone.
+   */
+  async function lockAway(runId, made) {
+    for (const dir of [made.outDir, made.home]) {
+      try {
+        const info = await lstat(dir);
+        if (!info.isDirectory() || info.isSymbolicLink()) continue;
+        await chown(dir, process.getuid(), process.getgid());
+        await chmod(dir, 0o700);
+      } catch (error) {
+        log.error(`run ${runId}: closing ${dir}: ${error.code ?? error.message}`);
+      }
+    }
+  }
+
   /** Run one claimed run to the end. Never throws for a problem with the run itself. */
   async function processRun(run) {
     // Set before anything slow, so that a shutdown from here on puts the run back in the queue.
     current = new AbortController();
     if (stopping) current.abort();
     let workDir = null;
+    let dirs = null;
+    // Set when a stop failed: a process of the run's user may still be running, so nothing of
+    // the run may be read or deleted any more (see finally).
+    let unsafe = false;
+    const stopOrMark = async () => {
+      try {
+        await stopRunProcesses();
+      } catch (error) {
+        unsafe = true;
+        throw error;
+      }
+    };
     try {
       log.log(`run ${run.id}: started (${run.base_url})`);
       // Check again: a user can insert a queued run straight into the table, past the API.
@@ -192,8 +343,8 @@ export function createWorker({ db, catalog, config, execute = executeRun, lookup
       if (!egress.ok) return await finish(run, { status: "failed", error: `Refused: ${egress.reason}.` });
 
       // A process left by an earlier run could otherwise write into this person's folder.
-      await stopRunProcesses();
-      const dirs = await makeWorkDir();
+      await stopOrMark();
+      dirs = await makeWorkDir();
       workDir = dirs.workDir;
       const outDir = dirs.outDir;
       const job = {
@@ -213,7 +364,7 @@ export function createWorker({ db, catalog, config, execute = executeRun, lookup
         return;
       }
       // Nothing may write into the folder while it is read, and it must be the folder made for it.
-      await stopRunProcesses();
+      await stopOrMark();
       await checkReportsFolder(dirs.reports);
       const { saved: files, skipped } = await saveReports(run.id, outDir, { realRoot: dirs.reports.real, uid: dirs.reports.uid });
       await recordResults(run.id, outcome.results, files);
@@ -234,8 +385,22 @@ export function createWorker({ db, catalog, config, execute = executeRun, lookup
     } finally {
       current = null;
       // On every path (done, failed, aborted for a deploy): nothing of this run may outlive it.
-      await stopRunProcesses().catch((error) => log.error(`run ${run.id}: stopping its processes: ${error.message}`));
-      if (workDir) await rm(workDir, { recursive: true, force: true }).catch((error) => log.error(`run ${run.id}: removing its folder: ${error.message}`));
+      try {
+        await stopRunProcesses();
+      } catch (error) {
+        unsafe = true;
+        log.error(`run ${run.id}: stopping its processes: ${error.message}`);
+      }
+      if (!unsafe && workDir && !(await removeWorkDir(run.id, dirs, workDir))) unsafe = true;
+      if (unsafe) {
+        // A process of the run's user may still be alive, or the run left files that would stay
+        // as that user's for later runs. Reading or deleting them as root could be steered (a
+        // folder swapped for a link mid-walk), so do neither. The run is already failed or
+        // requeued. End the server: with tini as PID 1 the whole container stops, which ends
+        // every process in it and its /tmp, and the host starts a fresh one.
+        log.error(`run ${run.id}: the run's processes or files could not be cleared; leaving ${workDir ?? "its folder"} alone and exiting`);
+        exit(1);
+      }
     }
   }
 

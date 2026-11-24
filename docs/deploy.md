@@ -283,26 +283,52 @@ domain only you control, where you can.
   - A leaked `WORKER_TOKEN` lets its holder claim, fill in, finish or requeue runs. It cannot read
     anyone's runs, results or reports.
   - **The run's files are not trusted.** The run's user (`RUN_AS_UID`) can write anything into
-    its reports folder, and the server reads that folder as root. So (`server/reports.js`):
+    its reports folder, and the server runs as root. So (`server/reports.js`,
+    `server/report-child.js`):
+    - **the server never reads or deletes the run's files as root.** A short child process that
+      runs as the run's user lists and reads the reports, and sends them to the server over IPC.
+      The server checks each answer (its shape, and paths inside the folder), and the whole
+      read has a time limit. Another child empties `reports/` and `home/` at the end. Root then
+      removes the two folders and the work folder one at a time with `rmdir`, which never follows
+      a link and fails on a folder that is not empty. Whatever a process of that user might
+      still do, reading and deleting reach only what that user may anyway. The child first makes
+      the run's own folders writable again, so a folder the run made read-only does not stay.
+      **If anything is still left**, it would be in `/tmp` as that user's, for later runs to
+      read: root takes `reports/` and `home/` and closes them to everyone else (mode 0700), and
+      the server exits, as after a failed stop (below);
     - the run's work folder belongs to the server (mode 0755); only `reports/` and `home/` inside
       it are the run user's, so the run cannot rename or replace them. Before reading, the
       server checks that `reports/` is still the folder it made: not a link, the same inode, the
       same owner;
     - before each run, before its reports are read, and when it ends on any path, the server
-      ends every process of that user. It kills them by user, not by pid (a helper running as
-      that user calls `kill(-1, SIGKILL)`), and waits until none has a live thread, so a
-      process whose main thread has exited is caught too;
-    - it lists the folder without following links, and keeps regular files only;
-    - it opens each file with `O_NOFOLLOW`, and checks the open handle: a regular file, owned by
-      the run's user, with a single link (so not a hard link to another file), of at most 2 MiB.
-      It reads no further than that, and refuses a file whose folder resolves outside the
-      reports folder as recorded when it was made.
+      ends every process of that user. Each pass kills every listed pid from root, which they
+      cannot block, and then everything of that user at once: a helper calls
+      `kill(-1, SIGKILL)` once as that user, which the kernel sends to every process of the
+      user it can signal. The helper
+      starts as root and becomes the user inside itself, with no exec afterwards, so a process
+      of that user can never trace it and fake its result. Root ends the helper after a second
+      if it is stopped. The stop returns only after a pass whose helper ran to
+      the end and a scan after it that finds no live thread of that user; one empty scan is
+      never taken as proof;
+    - **if that stop does not succeed** (within 10 seconds), the run fails or goes back in the
+      queue, the server reads and deletes nothing of it, and it exits. With tini as PID 1 the
+      whole container then stops, which ends every process in it, and Render starts a fresh one;
+    - the listing does not follow links, and keeps regular files only;
+    - each file is opened with `O_NOFOLLOW`, and the open handle is checked: a regular file, owned
+      by the run's user, with a single link (so not a hard link to another file), of at most
+      2 MiB. The read goes no further than that, and a file whose folder resolves outside the
+      reports folder as recorded when it was made is refused.
 
-    So a link to `/proc/self/environ`, a folder swapped for a link, or a hard link never makes
-    the server read a file the run could not.
-  - **PID 1** in the image is `tini` (`ENTRYPOINT ["/usr/bin/tini", "--"]`), which reaps
-    orphaned processes, so a run's leftovers do not pile up as zombies. It also passes Render's
-    SIGTERM on to the server, which then puts a run in progress back in the queue.
+    So a link to `/proc/self/environ`, a folder swapped for a link, a hard link, or a process
+    left running never makes the server read or delete a file the run could not.
+  - **PID 1** in the image is `tini` (`ENTRYPOINT ["/usr/bin/tini", "-s", "--"]`), which reaps
+    orphaned processes, so a run's leftovers do not pile up as zombies (`-s` keeps it reaping
+    even if the host puts another init in front of it). It passes Render's SIGTERM on to the
+    server, which then puts a run in progress back in the queue, and it exits when the server
+    exits.
+  - **`RUN_AS_UID` must be a user nothing else uses** in the container: the server ends every
+    process of that user. The image's `runner` (10001) is used only by runs. Outside Docker, and
+    for the root-only tests, use a user of its own.
   - The run process that drives the browser gets only a short list of harmless variables (`PATH`,
     `HOME`, `TMPDIR`, the locale and time zone, `NODE_ENV` and `PLAYWRIGHT_BROWSERS_PATH`). It runs as `runner`, an unprivileged user, while the
     server runs as root. So even a page that breaks out of Chromium cannot read the server's
