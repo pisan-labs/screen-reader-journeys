@@ -279,28 +279,37 @@ domain only you control, where you can.
   - A leaked `WORKER_TOKEN` lets its holder claim, fill in, finish or requeue runs. It cannot read
     anyone's runs, results or reports.
   - **The run's files are not trusted.** The run's user (`RUN_AS_UID`) can write anything into
-    its reports folder, and the server reads that folder as root. So (`server/reports.js`):
+    its reports folder, and the server runs as root. So (`server/reports.js`,
+    `server/report-child.js`):
+    - **the server never reads or deletes the run's files as root.** A short child process that
+      runs as the run's user lists and reads the reports, and sends them to the server over IPC.
+      Another empties `reports/` and `home/` at the end. Root then removes the two folders and
+      the work folder one at a time with `rmdir`, which never follows a link and fails on a
+      folder that is not empty (what is left stays, and is logged). Whatever a process of that
+      user might still do, reading and deleting reach only what that user may anyway;
     - the run's work folder belongs to the server (mode 0755); only `reports/` and `home/` inside
       it are the run user's, so the run cannot rename or replace them. Before reading, the
       server checks that `reports/` is still the folder it made: not a link, the same inode, the
       same owner;
     - before each run, before its reports are read, and when it ends on any path, the server
       ends every process of that user. Each pass kills every listed pid from root, which they
-      cannot block, and then everything of that user at once (a helper running as that user
-      calls `kill(-1, SIGKILL)`, and root ends the helper after a second if it is stopped). It
-      waits until none has a live thread, so a process whose main thread has exited is caught
-      too;
-    - **if that stop fails** (after 10 seconds), the run fails or goes back in the queue, the
-      server reads and deletes nothing of it, and it exits. With tini as PID 1 the whole
-      container then stops, which ends every process in it, and Render starts a fresh one;
-    - it lists the folder without following links, and keeps regular files only;
-    - it opens each file with `O_NOFOLLOW`, and checks the open handle: a regular file, owned by
-      the run's user, with a single link (so not a hard link to another file), of at most 2 MiB.
-      It reads no further than that, and refuses a file whose folder resolves outside the
-      reports folder as recorded when it was made.
+      cannot block, and then everything of that user at once: a helper running as that user
+      calls `kill(-1, SIGKILL)` once, which the kernel sends to every process of the user in
+      one pass, and which a process that forks to get away cannot outrun. Root ends the helper
+      after a second if it is stopped. The stop returns only after a pass whose helper ran to
+      the end and a scan after it that finds no live thread of that user; one empty scan is
+      never taken as proof;
+    - **if that stop does not succeed** (within 10 seconds), the run fails or goes back in the
+      queue, the server reads and deletes nothing of it, and it exits. With tini as PID 1 the
+      whole container then stops, which ends every process in it, and Render starts a fresh one;
+    - the listing does not follow links, and keeps regular files only;
+    - each file is opened with `O_NOFOLLOW`, and the open handle is checked: a regular file, owned
+      by the run's user, with a single link (so not a hard link to another file), of at most
+      2 MiB. The read goes no further than that, and a file whose folder resolves outside the
+      reports folder as recorded when it was made is refused.
 
-    So a link to `/proc/self/environ`, a folder swapped for a link, or a hard link never makes
-    the server read a file the run could not.
+    So a link to `/proc/self/environ`, a folder swapped for a link, a hard link, or a process
+    left running never makes the server read or delete a file the run could not.
   - **PID 1** in the image is `tini` (`ENTRYPOINT ["/usr/bin/tini", "-s", "--"]`), which reaps
     orphaned processes, so a run's leftovers do not pile up as zombies (`-s` keeps it reaping
     even if the host puts another init in front of it). It passes Render's SIGTERM on to the

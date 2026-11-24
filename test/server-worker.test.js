@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { loadCatalog, REPO_ROOT } from "../server/catalog.js";
-import { childEnv } from "../server/execute.js";
+import { childEnv, executeRun } from "../server/execute.js";
 import { timeoutFetch } from "../server/timeout-fetch.js";
 import { parseAllowedHosts } from "../server/hosts.js";
 import { MAX_REPORT_BYTES, createWorker } from "../server/worker.js";
@@ -403,8 +403,11 @@ describe("worker, with a fake run process", () => {
     const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
     const fake = fakeSupabase({ runs: [run] });
     const events = [];
-    const execute = async () => {
+    let workDir;
+    const execute = async (job) => {
       events.push("execute");
+      workDir = join(job.outDir, "..");
+      await writeFile(join(job.outDir, "summary.md"), "# Summary");
       return { outcome: "done", error: null, results: [summary(BASIC, "walker")], blocked: [] };
     };
     const stopProcesses = async (runAs) => events.push(`stop ${runAs.uid}:${runAs.gid}`);
@@ -412,9 +415,40 @@ describe("worker, with a fake run process", () => {
     const uid = process.getuid();
     const gid = process.getgid();
     const own = { ...config, runAs: { uid, gid } };
-    await createWorker({ db: dbOf(fake), catalog, config: own, execute, lookup, log: quiet, stopProcesses }).tick();
+    const exits = [];
+    await createWorker({ db: dbOf(fake), catalog, config: own, execute, lookup, log: quiet, stopProcesses, exit: (code) => exits.push(code) }).tick();
     assert.deepEqual(events, [`stop ${uid}:${gid}`, "execute", `stop ${uid}:${gid}`, `stop ${uid}:${gid}`]);
     assert.equal(fake.run(run.id).status, "done");
+    // Read through the run user's child, then emptied by it and removed folder by folder.
+    assert.equal(fake.report(run.id, "summary.md").body, "# Summary");
+    assert.ok(!existsSync(workDir), "the work folder is gone");
+    assert.deepEqual(exits, []);
+  });
+
+  it("when only the stop before reading fails: reads and deletes nothing, and ends the server (R2.F-2)", async () => {
+    const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+    const fake = fakeSupabase({ runs: [run] });
+    let stops = 0;
+    const stopProcesses = async () => {
+      if (++stops === 2) throw new Error("processes of user 10001 are still running: 99");
+    };
+    let workDir;
+    const execute = async (job) => {
+      workDir = join(job.outDir, "..");
+      await writeFile(join(job.outDir, "summary.md"), "# Summary");
+      return { outcome: "done", error: null, results: [summary(BASIC, "walker")], blocked: [] };
+    };
+    const exits = [];
+    const own = { ...config, runAs: { uid: process.getuid(), gid: process.getgid() } };
+    try {
+      await createWorker({ db: dbOf(fake), catalog, config: own, execute, lookup, log: quiet, stopProcesses, exit: (code) => exits.push([code, fake.run(run.id).status]) }).tick();
+      assert.equal(stops, 3, "the last stop succeeded");
+      assert.equal(fake.tables.run_reports.length, 0);
+      assert.deepEqual(exits, [[1, "failed"]]);
+      assert.ok(existsSync(join(workDir, "reports", "summary.md")), "the run's folder is left alone");
+    } finally {
+      if (workDir) await rm(workDir, { recursive: true, force: true });
+    }
   });
 
   it("when the run's processes will not stop: fails the run, reads and deletes nothing, and ends the server (R2.3-2)", async () => {
@@ -440,7 +474,7 @@ describe("worker, with a fake run process", () => {
       assert.deepEqual(exits, [[1, "failed"]], "the server ends once, after the run is marked failed");
       assert.ok(existsSync(join(workDir, "reports", "summary.md")), "the run's folder is left alone");
     } finally {
-      await rm(workDir, { recursive: true, force: true });
+      if (workDir) await rm(workDir, { recursive: true, force: true });
     }
   });
 
@@ -464,7 +498,7 @@ describe("worker, with a fake run process", () => {
       assert.deepEqual(exits, [1]);
       assert.ok(existsSync(workDir), "the run's folder is left alone");
     } finally {
-      await rm(workDir, { recursive: true, force: true });
+      if (workDir) await rm(workDir, { recursive: true, force: true });
     }
   });
 
@@ -566,10 +600,19 @@ describe("run process environment", () => {
     try {
       const run = queued({ base_url: `${site.url}/`, journeys: [BASIC] });
       const fake = fakeSupabase({ runs: [run] });
-      await createWorker({ db: dbOf(fake), catalog, config: configFor(new URL(site.url).host, { runAs: { uid: 10001, gid: 10001 } }), log: quiet }).tick();
+      // A failed stop must show as a failed assertion here, not end the test file.
+      const exits = [];
+      let outDir;
+      const execute = (job, options) => {
+        outDir = job.outDir;
+        return executeRun(job, options);
+      };
+      await createWorker({ db: dbOf(fake), catalog, config: configFor(new URL(site.url).host, { runAs: { uid: 10001, gid: 10001 } }), execute, log: quiet, exit: (code) => exits.push(code) }).tick();
+      assert.deepEqual(exits, []);
       assert.equal(fake.run(run.id).status, "done", fake.run(run.id).error);
       assert.ok(fake.report(run.id, "basic-test-page.walker.md"));
       assert.ok(!fake.tables.run_reports.some((r) => r.path.includes("home/")), "the browser's own files are not saved");
+      assert.ok(!existsSync(join(outDir, "..")), "the work folder is gone, emptied as the run's user");
     } finally {
       site.close();
     }

@@ -6,7 +6,7 @@ import { link, mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/pr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
-import { checkReportsFolder, listReportFiles, processesOf, readReportFile, recordReportsFolder, stopUserProcesses } from "../server/reports.js";
+import { checkReportsFolder, killAllOf, listReportFiles, processesOf, readReportFile, recordReportsFolder, startReportChild, stopUserProcesses } from "../server/reports.js";
 
 const MARKER = "SECRET-MARKER-the-server-must-never-read-this";
 let base;
@@ -105,6 +105,7 @@ describe("stopping the run's processes", () => {
   const killer = (proc, uids, calls = []) => async (uid, gid) => {
     calls.push([uid, gid]);
     for (const [pid, owner] of uids) if (owner === uid) execFileSync("rm", ["-rf", join(proc, String(pid))]);
+    return true; // the helper's kill(-1) ran to the end
   };
   /** Never signal a real process from a fake /proc's pids: record them instead. */
   const fakeKill = (killed = []) => (pid, signal) => killed.push([pid, signal]);
@@ -142,6 +143,29 @@ describe("stopping the run's processes", () => {
     const proc = await fakeProc([[31, 10001]]);
     await assert.rejects(stopUserProcesses(10001, { procDir: proc, timeoutMs: 100, killAll: async () => {}, kill: fakeKill() }), /processes of user 10001 are still running: 31/);
     await assert.rejects(stopUserProcesses(0, { procDir: proc }), /a user other than root/);
+    await rm(proc, { recursive: true });
+  });
+
+  it("never takes one empty scan as proof: it returns only after a helper ran to the end (R2.F-1)", async () => {
+    const proc = await fakeProc([]); // a process that forks and exits fast is never in a scan
+    let helpers = 0;
+    await assert.rejects(
+      stopUserProcesses(10001, { procDir: proc, timeoutMs: 200, killAll: async () => (helpers++, false), kill: fakeKill() }),
+      /could not confirm that every process of user 10001 ended/
+    );
+    assert.ok(helpers >= 1, "it tried");
+    let calls = 0;
+    await stopUserProcesses(10001, { procDir: proc, killAll: async () => (calls++, true), kill: fakeKill() });
+    assert.equal(calls, 1, "one completed helper, then an empty scan");
+    await rm(proc, { recursive: true });
+  });
+
+  it("leaves no timer running once it returns (R2.F-3)", async () => {
+    const proc = await fakeProc([]);
+    const timers = () => process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
+    const before = timers();
+    await stopUserProcesses(10001, { procDir: proc, timeoutMs: 60000, killAll: async () => true, kill: fakeKill() });
+    assert.equal(timers(), before);
     await rm(proc, { recursive: true });
   });
 
@@ -248,4 +272,136 @@ for (;;) {
       assert.equal(await exited, "SIGKILL");
     });
   }
+
+  it("ends the kill helper from root after its time limit when it is stopped (R2.F-2)", { skip: !root && "needs root, as in the Docker image" }, async () => {
+    const { child, exited } = await hunter("SIGSTOP");
+    try {
+      const started = Date.now();
+      assert.equal(await killAllOf(10001, 10001, { limitMs: 300 }), false, "a stopped helper proves nothing");
+      assert.ok(Date.now() - started < 5000, "root ended it");
+    } finally {
+      await stopUserProcesses(10001);
+    }
+    assert.equal(await exited, "SIGKILL");
+    assert.ok(!(await live(child.pid)));
+  });
+
+  let cc = false;
+  try {
+    execFileSync("cc", ["--version"], { stdio: "ignore" });
+    cc = true;
+  } catch {
+    // No C compiler here: the next test cannot build a fast enough hopper.
+  }
+  it("ends, or refuses to vouch for, a process that forks and exits faster than a scan sees it (R2.F-1)", { skip: (!root && "needs root, as in the Docker image") || (!cc && "needs a C compiler") }, async () => {
+    // Each generation forks, and the parent exits at once: about 100 µs a pid, never in a /proc scan.
+    // It writes "survived" only if it reaches its own time limit, so survival is read from the
+    // hopper itself, not from the scan under test.
+    const source = join(base, "hopper.c");
+    const binary = join(base, "hopper");
+    const survived = join(base, "hopper-survived");
+    const started = join(base, "hopper-started");
+    const LIMIT_S = 3;
+    await writeFile(
+      source,
+      `#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <unistd.h>
+int main(int argc, char **argv) {
+  struct timespec t0, t;
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  FILE *f = fopen(argv[2], "w");
+  if (f) { fputs("yes", f); fclose(f); }
+  for (;;) {
+    pid_t p = fork();
+    if (p > 0) _exit(0);
+    if (p < 0) continue;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    if ((t.tv_sec - t0.tv_sec) + (t.tv_nsec - t0.tv_nsec) / 1e9 > atof(argv[3])) {
+      FILE *g = fopen(argv[1], "w");
+      if (g) { fputs("survived", g); fclose(g); }
+      _exit(0);
+    }
+  }
+}
+`
+    );
+    execFileSync("cc", ["-O2", "-o", binary, source]);
+    execFileSync("chmod", ["a+rx", base, binary]);
+    execFileSync("chmod", ["a+w", base]);
+    const spawnedAt = Date.now();
+    spawn(binary, [survived, started, String(LIMIT_S)], { uid: 10001, gid: 10001, detached: true, stdio: "ignore" }).unref();
+    const { readFile } = await import("node:fs/promises");
+    await until(async () => (await readFile(started, "utf8").catch(() => "")) === "yes");
+    // Returning means the stop vouches that nothing is left; throwing means it would not.
+    const outcome = await stopUserProcesses(10001, { timeoutMs: 5000 }).then(() => "returned", (error) => error.message);
+    // The hopper's own clock decides survival: wait until its limit has passed.
+    await until(async () => Date.now() > spawnedAt + LIMIT_S * 1000 + 500);
+    assert.equal(await readFile(survived, "utf8").catch(() => "no"), "no", `the hopper outlived a stop that ${outcome}`);
+    assert.deepEqual(await processesOf(10001), []);
+  });
 });
+
+describe("the report child (reading and deleting as the run's user)", () => {
+  it("answers list, read and clear over IPC", async () => {
+    const folder = await mkdtemp(join(tmpdir(), "srj-child-"));
+    await mkdir(join(folder, "reports", "sub"), { recursive: true });
+    await mkdir(join(folder, "home"));
+    await writeFile(join(folder, "reports", "summary.md"), "# Summary");
+    await writeFile(join(folder, "reports", "sub", "deep.md"), "deep");
+    await writeFile(join(folder, "home", "cache"), "x");
+    await symlink(outside, join(folder, "reports", "link"));
+    const child = startReportChild(null);
+    try {
+      assert.deepEqual(await child.call({ op: "list", dir: join(folder, "reports") }), { files: ["sub/deep.md", "summary.md"], others: ["link"] });
+      assert.deepEqual(await child.call({ op: "read", dir: join(folder, "reports"), path: "summary.md", maxBytes: 100 }), { text: "# Summary" });
+      assert.deepEqual(await child.call({ op: "clear", dirs: [join(folder, "reports"), join(folder, "home")] }), { left: [] });
+      await assert.rejects(child.call({ op: "nonsense" }), /report child: unknown request/);
+    } finally {
+      child.close();
+    }
+    const { readdir } = await import("node:fs/promises");
+    assert.deepEqual(await readdir(join(folder, "reports")), []);
+    assert.deepEqual(await readdir(join(folder, "home")), []);
+    assert.deepEqual(await readdir(outside), ["secret.txt"], "clearing removed the link, not what it points at");
+    await rm(folder, { recursive: true });
+  });
+
+  it("fails a request it does not answer in time", async () => {
+    const child = startReportChild(null, { limitMs: 1 });
+    try {
+      await assert.rejects(child.call({ op: "list", dir: reports }), /no answer within 1 ms|report child ended/);
+    } finally {
+      child.close();
+    }
+  });
+
+  const root = process.getuid?.() === 0;
+  it("as the run's user, cannot read or delete root's files, whatever links the run left", { skip: !root && "needs root, as in the Docker image" }, async () => {
+    const folder = await mkdtemp(join(tmpdir(), "srj-child-"));
+    const vault = await mkdtemp(join(tmpdir(), "srj-vault-")); // root's, 0700
+    await writeFile(join(vault, "keep.txt"), "root's");
+    execFileSync("chmod", ["0755", folder]);
+    await mkdir(join(folder, "reports"));
+    await writeFile(join(folder, "reports", "root-only.md"), "root's report");
+    execFileSync("chmod", ["0600", join(folder, "reports", "root-only.md")]);
+    await symlink(vault, join(folder, "reports", "vault"));
+    execFileSync("chown", ["10001:10001", join(folder, "reports")]);
+    execFileSync("chown", ["-h", "10001:10001", join(folder, "reports", "vault")]);
+    const child = startReportChild({ uid: 10001, gid: 10001 });
+    try {
+      assert.deepEqual(await child.call({ op: "read", dir: join(folder, "reports"), path: "root-only.md", maxBytes: 100 }), { refused: "not readable" });
+      // Swapped in as if it were a folder of the run's: the child cannot list or empty root's folder.
+      const cleared = await child.call({ op: "clear", dirs: [vault] });
+      assert.deepEqual(cleared, { left: [vault] });
+    } finally {
+      child.close();
+    }
+    const { readFile } = await import("node:fs/promises");
+    assert.equal(await readFile(join(vault, "keep.txt"), "utf8"), "root's");
+    await rm(folder, { recursive: true });
+    await rm(vault, { recursive: true });
+  });
+});
+

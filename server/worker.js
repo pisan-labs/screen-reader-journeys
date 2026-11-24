@@ -2,13 +2,14 @@
 // results. One run at a time. `db` is workerDb() from worker-db.js: the token-checked worker_*
 // functions, and nothing else (or a fake with the same methods, in the tests).
 
-import { chmod, chown, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { chmod, chown, mkdir, mkdtemp, rm, rmdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 import { findJourney } from "./catalog.js";
 import { executeRun } from "./execute.js";
 import { resolveEgress } from "./hosts.js";
-import { checkReportsFolder, listReportFiles, readReportFile, recordReportsFolder, stopUserProcesses } from "./reports.js";
+import { clearFolders } from "./report-child.js";
+import { checkReportsFolder, listReportFiles, readReportFile, recordReportsFolder, startReportChild, stopUserProcesses } from "./reports.js";
 import { validateRunRequest } from "./validate.js";
 
 /** A report larger than this is left out (the database refuses it); the summary says so. */
@@ -68,6 +69,7 @@ export function createWorker({
   log = console,
   stopProcesses = (runAs) => stopUserProcesses(runAs.uid, { gid: runAs.gid }),
   exit = (code) => process.exit(code),
+  startChild = startReportChild,
 }) {
   let stopping = false;
   let loop = null;
@@ -87,6 +89,30 @@ export function createWorker({
   }
 
   /**
+   * The run's files are read and deleted as the run's own user when there is one (RUN_AS_UID):
+   * in a child process, over IPC (report-child.js). Root never reads or deletes them itself, so
+   * whatever a process of that user might still do, these reach only what that user may.
+   * Without RUN_AS_UID there is no such boundary, and the same work runs here.
+   */
+  function reportAccess() {
+    if (!config.runAs) {
+      return {
+        list: (dir) => listReportFiles(dir),
+        read: (dir, path, options) => readReportFile(dir, path, MAX_REPORT_BYTES, options),
+        clear: (dirs) => clearFolders(dirs),
+        close() {},
+      };
+    }
+    const child = startChild(config.runAs);
+    return {
+      list: (dir) => child.call({ op: "list", dir }),
+      read: (dir, path, options) => child.call({ op: "read", dir, path, maxBytes: MAX_REPORT_BYTES, ...options }),
+      clear: (dirs) => child.call({ op: "clear", dirs }),
+      close: () => child.close(),
+    };
+  }
+
+  /**
    * Save each report file the run wrote. Resolves to the saved paths and the ones left out. A
    * file the database refuses is left out, never a reason to fail a run that finished.
    *
@@ -96,13 +122,22 @@ export function createWorker({
    * than the limit. Its name is checked before it is sent.
    */
   async function saveReports(runId, dir, { realRoot, uid }) {
+    const access = reportAccess();
+    try {
+      return await saveReportsWith(access, runId, dir, { realRoot, uid });
+    } finally {
+      access.close();
+    }
+  }
+
+  async function saveReportsWith(access, runId, dir, { realRoot, uid }) {
     const saved = [];
     const skipped = [];
     const leaveOut = (file, why) => {
       skipped.push(file);
       log.log(`run ${runId}: left out ${file} (${why})`);
     };
-    const { files, others } = await listReportFiles(dir);
+    const { files, others } = await access.list(dir);
     for (const file of others) leaveOut(file, "a link or other non-file");
     for (const file of files) {
       const type = CONTENT_TYPES[extname(file)];
@@ -114,7 +149,7 @@ export function createWorker({
         leaveOut(file, "a name the database does not take");
         continue;
       }
-      const read = await readReportFile(dir, file, MAX_REPORT_BYTES, { realRoot, uid });
+      const read = await access.read(dir, file, { realRoot, uid });
       if ("refused" in read) {
         leaveOut(file, read.refused);
         continue;
@@ -174,12 +209,37 @@ export function createWorker({
     return { workDir, outDir, home, reports: await recordReportsFolder(outDir) };
   }
 
+  /**
+   * Remove a run's work folder. With RUN_AS_UID, the run user's child empties reports/ and home/,
+   * and root then removes the three folders one at a time with rmdir, which never follows a link
+   * and fails on a folder that is not empty: whatever is left stays, and is logged.
+   */
+  async function removeWorkDir(runId, made, workDir) {
+    if (!config.runAs || !made) {
+      await rm(workDir, { recursive: true, force: true }).catch((error) => log.error(`run ${runId}: removing its folder: ${error.message}`));
+      return;
+    }
+    const access = reportAccess();
+    try {
+      const { left } = await access.clear([made.outDir, made.home]);
+      if (left.length) log.error(`run ${runId}: could not remove ${left.length} of its files`);
+    } catch (error) {
+      log.error(`run ${runId}: emptying its folders: ${error.message}`);
+    } finally {
+      access.close();
+    }
+    for (const dir of [made.outDir, made.home, workDir]) {
+      await rmdir(dir).catch((error) => log.error(`run ${runId}: removing ${dir}: ${error.code ?? error.message}`));
+    }
+  }
+
   /** Run one claimed run to the end. Never throws for a problem with the run itself. */
   async function processRun(run) {
     // Set before anything slow, so that a shutdown from here on puts the run back in the queue.
     current = new AbortController();
     if (stopping) current.abort();
     let workDir = null;
+    let dirs = null;
     // Set when a stop failed: a process of the run's user may still be running, so nothing of
     // the run may be read or deleted any more (see finally).
     let unsafe = false;
@@ -202,7 +262,7 @@ export function createWorker({
 
       // A process left by an earlier run could otherwise write into this person's folder.
       await stopOrMark();
-      const dirs = await makeWorkDir();
+      dirs = await makeWorkDir();
       workDir = dirs.workDir;
       const outDir = dirs.outDir;
       const job = {
@@ -257,7 +317,7 @@ export function createWorker({
         log.error(`run ${run.id}: a process of the run's user would not stop; leaving ${workDir ?? "its folder"} alone and exiting`);
         exit(1);
       } else if (workDir) {
-        await rm(workDir, { recursive: true, force: true }).catch((error) => log.error(`run ${run.id}: removing its folder: ${error.message}`));
+        await removeWorkDir(run.id, dirs, workDir);
       }
     }
   }

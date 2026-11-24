@@ -33,3 +33,7 @@ Append-only journal, oldest first. Earlier history: `git log` and `docs/handoff.
 2026-11-23 [decision] PManager: tini as PID 1 in the image (ENTRYPOINT ["/usr/bin/tini", "--"]), so orphaned zombies are reaped.
 
 2026-11-23 [code] Review of #11 round 3: the stop also kills each pid from root and limits the helper; a failed stop reads and deletes nothing and ends the server; tini -s.
+
+2026-11-24 [decision] Owner ("SR fix 1", via PManager): fix R2.F-1 by reading and deleting the run's files as the run's user, and a stop that is proven by a completed kill(-1) as that user.
+
+2026-11-24 [code] R2.F-1 to R2.F-3: report-child.js reads and clears as RUN_AS_UID over IPC, root only rmdirs; the stop returns only after a completed kill(-1) helper and an empty scan; pause timers cleared.
