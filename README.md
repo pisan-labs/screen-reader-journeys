@@ -181,9 +181,9 @@ The hosted service is these parts, and only these:
 - **Supabase** (`supabase/`): the schema `app_screen_reader_journeys` on the shared HintWise
   project, holding runs, their results and their reports, with row level security.
 - **Render** (`render.yaml`, `Dockerfile`, `server/`): the API and the worker that runs journeys
-  in Chromium. It tests only the sites listed in `ALLOWED_TARGET_HOSTS`, and only the journeys in
-  its own `targets/`. The worker reaches the database only through token-checked functions; there
-  is no service-role key.
+  in Chromium. It tests only the sites listed in `ALLOWED_TARGET_HOSTS` (or, with `*`, any public
+  site), and only the journeys in its own `targets/`. The worker reaches the database only through
+  token-checked functions; there is no service-role key.
 - **Netlify** (`netlify.toml`, `web/`): the dashboard, in Vite and TypeScript, with the HintWise
   sign-in (Google or an emailed 6-digit code), "Delete my account", the HintWise footer and the
   platform's cookieless visit counter.

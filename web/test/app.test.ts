@@ -187,6 +187,21 @@ describe('the dashboard', () => {
     expect(document.getElementById('journey-1')!.hasAttribute('aria-describedby')).toBe(false);
   });
 
+  it('says when the server tests any public address ("*")', async () => {
+    await setup({ answers: { 'GET /journeys': { status: 200, body: { ...CATALOG, allowed_hosts: ['*'] } } } });
+    await until(() => !!document.getElementById('base-url'), 'the form');
+    expect(view().textContent).toMatch(/may test any public address, with http or https on ports 80 and 443\./);
+    // What happens to the page, said where the address is entered (PManager, 24 November).
+    expect(document.getElementById('base-url-hint')!.textContent).toMatch(/The page is opened by a browser on our server, over the public internet\.$/);
+    expect(view().textContent).not.toMatch(/may test \*/);
+  });
+
+  it('names the exact sites listed with "*"', async () => {
+    await setup({ answers: { 'GET /journeys': { status: 200, body: { ...CATALOG, allowed_hosts: ['*', '127.0.0.1:4173'] } } } });
+    await until(() => !!document.getElementById('base-url'), 'the form');
+    expect(view().textContent).toMatch(/any public address, with http or https on ports 80 and 443, and 127\.0\.0\.1:4173\./);
+  });
+
   it('says when the server allows no sites', async () => {
     await setup({ answers: { 'GET /journeys': { status: 200, body: { ...CATALOG, allowed_hosts: [] } } } });
     await until(() => !!document.getElementById('base-url'), 'the form');
