@@ -333,6 +333,7 @@ begin
   end loop;
 end
 $$;
+select test.check(daily_run_limit() = 10, 'the limit is 10, in one function');
 select test.check((select runs from run_counts where user_id = '00000000-0000-4000-8000-00000000000f') = 10, 'ten counted');
 begin;
 select test.act_as('authenticated', '00000000-0000-4000-8000-00000000000f');

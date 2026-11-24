@@ -19,6 +19,14 @@ comment on table app_screen_reader_journeys.run_counts is 'Runs each person star
 
 alter table app_screen_reader_journeys.run_counts enable row level security;
 
+-- The limit, in one place: to change it later, a migration replaces only this function.
+create or replace function app_screen_reader_journeys.daily_run_limit()
+returns integer
+language sql
+immutable
+set search_path = ''
+as $$ select 10 $$;
+
 -- Nobody reads the counts through the API.
 drop policy if exists run_counts_none on app_screen_reader_journeys.run_counts;
 create policy run_counts_none on app_screen_reader_journeys.run_counts
@@ -33,6 +41,7 @@ set search_path = ''
 as $$
 declare
   today date := (pg_catalog.now() at time zone 'utc')::date;
+  most integer := app_screen_reader_journeys.daily_run_limit();
   started integer;
 begin
   -- An insert for someone else fails the policy anyway (see limit_active_runs).
@@ -45,9 +54,9 @@ begin
   values (new.user_id, today, 1)
   on conflict (user_id, day) do update set runs = c.runs + 1
   returning c.runs into started;
-  if started > 10 then
+  if started > most then
     -- The insert fails, and with it this count (and limit_active_runs's retention delete).
-    raise exception 'You have started 10 runs today (UTC). Try again tomorrow.'
+    raise exception 'You have started % runs today (UTC). Try again tomorrow.', most
       using errcode = '53400';
   end if;
   -- Only today and yesterday are kept.
@@ -64,3 +73,4 @@ create trigger runs_limit_daily
 
 revoke all on table app_screen_reader_journeys.run_counts from public, anon, authenticated;
 revoke execute on function app_screen_reader_journeys.limit_daily_runs() from public, anon, authenticated;
+revoke execute on function app_screen_reader_journeys.daily_run_limit() from public, anon, authenticated;
