@@ -1385,12 +1385,18 @@ describe("run-child.js sends the refusals left at the end (R9.3)", () => {
     assert.deepEqual(lines, ['{"type":"done"}\n']);
   });
 
-  it("a stopped run keeps the refusals of the journey it was in, through the real run process (R20.1-2)", async () => {
+  /**
+   * Run the real run-child.js on a journey whose page has a private address refused, and whose
+   * run() then never ends, so no result can carry the refusal: only the stop can send it.
+   * `stop(ready)` gives executeRun's options; `ready` settles once the refusal has been made (the
+   * page then asks for /after) and run() has begun (it asks for /in-run itself).
+   */
+  const stoppedRun = async (stop) => {
     const folder = await mkdtemp(join(tmpdir(), "srj-stop-"));
-    // Stopped once the page's private address has been refused (the page then asks for /after)
-    // and the journey's run() has begun (it asks for /in-run itself), so no result can carry it.
     const reached = { after: null, "in-run": null };
-    const both = Promise.all(Object.keys(reached).map((name) => new Promise((resolve) => (reached[name] = resolve))));
+    const ready = Promise.all(Object.keys(reached).map((name) => new Promise((resolve) => (reached[name] = resolve))));
+    let wasReady = false;
+    ready.then(() => (wasReady = true));
     const site = createServer((req, res) => {
       const name = req.url?.slice(1) ?? "";
       if (name in reached) return reached[name](), res.end("ok");
@@ -1403,16 +1409,30 @@ describe("run-child.js sends the refusals left at the end (R9.3)", () => {
       const host = `127.0.0.1:${site.address().port}`;
       await writeFile(file, `export default { name: "Stopped after a refusal", start: "/private.html", async run() { await fetch("http://${host}/in-run"); await new Promise(() => {}); } };\n`);
       const job = { baseUrl: `http://${host}/`, journeys: [{ path: "x/hang-private.journey.js", file }], modes: ["walker"], outDir: join(folder, "out"), allowedTargetHosts: host, chromiumSandbox: false };
-      const stop = new AbortController();
-      both.then(() => stop.abort());
-      const outcome = await executeRun(job, { timeoutMs: 60000, signal: stop.signal, log: quiet });
-      assert.equal(outcome.outcome, "aborted");
+      const outcome = await executeRun(job, { log: quiet, ...stop(ready) });
+      assert.ok(wasReady, "the page's refusal and run() both came before the stop");
       assert.deepEqual(outcome.results, [], "the journey never finished, so only the stop could send it");
       assert.ok(outcome.blocked.some((e) => e.startsWith("169.254.169.254:80 ")), JSON.stringify(outcome.blocked));
+      return outcome;
     } finally {
       site.close();
       await rm(folder, { recursive: true, force: true });
     }
+  };
+
+  it("a stopped run keeps the refusals of the journey it was in, through the real run process (R20.1-2)", async () => {
+    const outcome = await stoppedRun((ready) => {
+      const stop = new AbortController();
+      ready.then(() => stop.abort());
+      return { timeoutMs: 60000, signal: stop.signal };
+    });
+    assert.equal(outcome.outcome, "aborted");
+  });
+
+  it("so does a run stopped by its timeout (R9.3)", async () => {
+    // The page and run() take about a second; 8 s leaves room, as for the HANG test.
+    const outcome = await stoppedRun(() => ({ timeoutMs: 8000 }));
+    assert.equal(outcome.outcome, "timeout");
   });
 
   it("sends nothing when nothing is left, or no proxy has started", async () => {
