@@ -61,3 +61,7 @@ Append-only journal, oldest first. Earlier history: `git log` and `docs/handoff.
 2026-11-24 [decision] PManager: #14 merged as c2dc383; R5.1 to R5.3 listed in issue #15; a small PR for R5.1 before the service takes others' runs.
 
 2026-11-24 [code] R5.1: the run summary is kept under 48 KiB of JSON (names and blocked entries cut by code point, then trimmed); per-file log lines capped at 30.
+
+2026-11-24 [scope] Owner (via PManager): any signed-in person may test any public address; built as ALLOWED_TARGET_HOSTS="*", the allow-list stays the default.
+
+2026-11-24 [code] "*" rule: public hosts only, ports 80 and 443, checked at queue, run start and every connection; migration 0002 adds 10 runs per person per UTC day.

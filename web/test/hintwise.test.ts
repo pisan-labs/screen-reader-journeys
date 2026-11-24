@@ -38,6 +38,7 @@ describe('HintWise footer, favicon and analytics', () => {
     expect(privacy).toMatch(/Supabase, US East/);
     expect(privacy).toMatch(/Delete my account/);
     expect(privacy).toMatch(/Finished runs are deleted once they are 30 days old, the next time the service runs/);
+    expect(privacy).toMatch(/the number of runs you started is kept for today and yesterday \(UTC\)/);
     expect(privacy).toMatch(/at most your 20 latest runs/);
     expect(privacy).toMatch(/counted without cookies/);
     expect(privacy).not.toMatch(/no tracking/i);

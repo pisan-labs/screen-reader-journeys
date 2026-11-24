@@ -50,8 +50,8 @@ select test.check(
   'every table has row level security, none forced');
 select test.check(
   (select count(*) from pg_class c
-    where c.relnamespace = 'app_screen_reader_journeys'::regnamespace and c.relkind = 'r') = 4,
-  'four tables');
+    where c.relnamespace = 'app_screen_reader_journeys'::regnamespace and c.relkind = 'r') = 5,
+  'five tables');
 select test.check(
   not exists (select 1 from pg_class c
     where c.relnamespace = 'app_screen_reader_journeys'::regnamespace and c.relkind = 'r'
@@ -66,8 +66,8 @@ select test.check(
     where p.pronamespace = 'app_screen_reader_journeys'::regnamespace and p.prosecdef),
   'every security definer function has search_path ''''');
 select test.check(
-  (select count(*) from pg_proc p where p.pronamespace = 'app_screen_reader_journeys'::regnamespace and p.prosecdef) = 9,
-  'nine security definer functions');
+  (select count(*) from pg_proc p where p.pronamespace = 'app_screen_reader_journeys'::regnamespace and p.prosecdef) = 10,
+  'ten security definer functions');
 select test.check(
   (select bool_and(not has_function_privilege('authenticated', p.oid, 'execute')) from pg_proc p
     where p.pronamespace = 'app_screen_reader_journeys'::regnamespace),
@@ -317,6 +317,67 @@ select test.check(exists (select 1 from runs where base_url = 'https://latest.ve
 select test.check(not exists (select 1 from runs where base_url = 'https://old-10.vercel.app/'), 'the oldest run went');
 select test.check((select count(*) from runs where user_id = '00000000-0000-4000-8000-00000000000b') = 1, 'nobody else''s runs went');
 
+\echo 'at most 10 runs a day per person, counted where people cannot see or reset it (0002)'
+insert into auth.users (id, email) values
+  ('00000000-0000-4000-8000-00000000000f', 'f@example.org'),
+  ('00000000-0000-4000-8000-000000000010', 'g@example.org');
+-- Ten runs today, each finished at once (as the table owner) so the 3-run limit does not stop them.
+do $$
+begin
+  for i in 1..10 loop
+    perform test.act_as('authenticated', '00000000-0000-4000-8000-00000000000f');
+    insert into app_screen_reader_journeys.runs (base_url, journeys, modes) values (format('https://f%s.vercel.app/', i), '{x}', '{walker}');
+    execute 'reset role';
+    update app_screen_reader_journeys.runs set status = 'done', finished_at = now()
+     where user_id = '00000000-0000-4000-8000-00000000000f' and status = 'queued';
+  end loop;
+end
+$$;
+select test.check((select runs from run_counts where user_id = '00000000-0000-4000-8000-00000000000f') = 10, 'ten counted');
+begin;
+select test.act_as('authenticated', '00000000-0000-4000-8000-00000000000f');
+select test.fails($$insert into app_screen_reader_journeys.runs (base_url, journeys, modes) values ('https://f11.vercel.app/', '{x}', '{walker}')$$, 'started 10 runs today \(UTC\)');
+commit;
+select test.check((select runs from run_counts where user_id = '00000000-0000-4000-8000-00000000000f') = 10, 'the refused run is not counted');
+do $$
+begin
+  perform test.act_as('authenticated', '00000000-0000-4000-8000-00000000000f');
+  insert into app_screen_reader_journeys.runs (base_url, journeys, modes) values ('https://f11.vercel.app/', '{x}', '{walker}');
+  raise exception 'the eleventh run was accepted';
+exception when sqlstate '53400' then
+  null;
+end
+$$;
+\echo 'deleting one''s runs does not reset the count, and people cannot read or change it'
+begin;
+select test.act_as('authenticated', '00000000-0000-4000-8000-00000000000f');
+delete from app_screen_reader_journeys.runs;
+select test.check((select count(*) from app_screen_reader_journeys.runs) = 0, 'F deleted every run');
+select test.fails($$insert into app_screen_reader_journeys.runs (base_url, journeys, modes) values ('https://f12.vercel.app/', '{x}', '{walker}')$$, 'started 10 runs today');
+select test.fails($$select * from app_screen_reader_journeys.run_counts$$, 'permission denied');
+select test.fails($$delete from app_screen_reader_journeys.run_counts$$, 'permission denied');
+select test.fails($$update app_screen_reader_journeys.run_counts set runs = 1$$, 'permission denied');
+select test.fails($$insert into app_screen_reader_journeys.run_counts (user_id, day, runs) values ('00000000-0000-4000-8000-00000000000f', '2000-01-01', 1)$$, 'permission denied');
+select test.fails($$select app_screen_reader_journeys.limit_daily_runs()$$, 'permission denied|trigger functions can only be called as triggers');
+commit;
+begin;
+select test.act_as('anon');
+select test.fails($$select * from app_screen_reader_journeys.run_counts$$, 'permission denied');
+commit;
+\echo 'another person is not limited by it, and a new UTC day starts a new count; older days go'
+begin;
+select test.act_as('authenticated', '00000000-0000-4000-8000-000000000010');
+insert into runs (base_url, journeys, modes) values ('https://g1.vercel.app/', '{x}', '{walker}');
+commit;
+update run_counts set day = day - 1 where user_id = '00000000-0000-4000-8000-00000000000f';
+insert into run_counts (user_id, day, runs) values ('00000000-0000-4000-8000-00000000000f', (now() at time zone 'utc')::date - 5, 3);
+begin;
+select test.act_as('authenticated', '00000000-0000-4000-8000-00000000000f');
+insert into runs (base_url, journeys, modes) values ('https://f-tomorrow.vercel.app/', '{x}', '{walker}');
+commit;
+select test.check((select runs from run_counts where user_id = '00000000-0000-4000-8000-00000000000f' and day = (now() at time zone 'utc')::date) = 1, 'today starts at one');
+select test.check((select count(*) from run_counts where user_id = '00000000-0000-4000-8000-00000000000f') = 2, 'today and yesterday are kept, older days go');
+
 \echo 'deleting an account deletes everything it owns'
 begin;
 select test.act_as('anon');
@@ -327,6 +388,7 @@ commit;
 delete from auth.users where id = '00000000-0000-4000-8000-00000000000a';
 select test.check((select count(*) from runs where user_id = '00000000-0000-4000-8000-00000000000a') = 0, 'A''s runs are gone');
 select test.check((select count(*) from run_results) + (select count(*) from run_reports) = 0, 'A''s results and reports are gone');
+select test.check((select count(*) from run_counts where user_id = '00000000-0000-4000-8000-00000000000a') = 0, 'A''s daily counts are gone');
 
 \echo 'worker_claim_next_run returns nothing when the queue is empty'
 update runs set status = 'done';
