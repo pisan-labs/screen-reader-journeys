@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import type { Session } from '@supabase/supabase-js';
-import { BASE_URL_KEY, startDashboard, type Catalog, type DashboardClient, type DashboardDeps, type Run } from '../src/app';
+import { BASE_URL_KEY, duration, startDashboard, type Catalog, type DashboardClient, type DashboardDeps, type Progress, type Run } from '../src/app';
 
 const RUN_ID = '3f2a1c9e-8b7d-4e6f-9a0b-1c2d3e4f5a6b';
 const HOME = 'targets/generic/home-tab-order.journey.js';
@@ -539,5 +539,85 @@ describe('the dashboard', () => {
     observed!();
     expect(wrap.hasAttribute('role')).toBe(false);
     vi.unstubAllGlobals();
+  });
+});
+
+describe('progress while a run is going (the owner: "The run is running." says too little)', () => {
+  const progress = (fields: Partial<Progress> = {}): Progress => ({
+    journey: HOME,
+    mode: 'walker',
+    step: 'press Tab',
+    n: 5,
+    index: 2,
+    of: 4,
+    done: 1,
+    passed: 1,
+    failed: 0,
+    errored: 0,
+    started_at: new Date(Date.now() - 80_000).toISOString(),
+    time_limit_s: 900,
+    ...fields,
+  });
+  const running = { status: 200, body: { run: run({ status: 'running', summary: null, run_results: [], finished_at: null }) } };
+  const box = () => document.getElementById('progress')?.textContent ?? '';
+  /** Every non-empty text the status line takes, in order. */
+  const announcements = () => {
+    const seen: string[] = [];
+    new MutationObserver(() => {
+      const text = statusText();
+      if (text) seen.push(text);
+    }).observe(document.getElementById('status')!, { childList: true, characterData: true, subtree: true });
+    return seen;
+  };
+
+  it('shows which journey and mode, the results so far, the step and the time, and says the first two', async () => {
+    await setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': { status: 200, body: CATALOG }, [`GET /runs/${RUN_ID}`]: running, [`GET /runs/${RUN_ID}/progress`]: { status: 200, body: { progress: progress() } } } });
+    await until(() => box().includes('Running'), 'the progress');
+    expect(box()).toMatch(/Running 2 of 4: Home page: Tab order, Keyboard walker\./);
+    expect(box()).toMatch(/So far: 1 passed, 0 failed, 0 errors\./);
+    expect(box()).toMatch(/Step 5: press Tab/);
+    expect(box()).toMatch(/1 min 2\d s of 15 min\./);
+    await until(() => statusText().startsWith('Running'), 'the announcement');
+    expect(statusText()).toBe('Running 2 of 4: Home page: Tab order, Keyboard walker. So far: 1 passed, 0 failed, 0 errors.');
+  });
+
+  it('says it again only when the journey or the results change, never for a step or the clock', async () => {
+    // Polls here come every 5 ms and an announcement lands after 50 ms, so each state lasts for
+    // a few dozen polls: the steps change, the journey and results stay the same.
+    const steps = [
+      ...Array.from({ length: 30 }, (_, i) => progress({ step: i % 2 ? 'press Tab' : 'press Enter', n: i + 1 })),
+      progress({ index: 3, done: 2, passed: 1, failed: 1, journey: 'targets/x/other.journey.js', step: null, n: null }),
+    ];
+    const ui = setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': { status: 200, body: CATALOG }, [`GET /runs/${RUN_ID}`]: running, [`GET /runs/${RUN_ID}/progress`]: steps.map((p) => ({ status: 200, body: { progress: p } })) } });
+    const seen = announcements();
+    await ui;
+    await until(() => box().includes('Running 3 of 4'), 'the third journey');
+    await until(() => seen.length >= 2, 'two announcements');
+    await new Promise((r) => setTimeout(r, 120));
+    expect(seen).toEqual([
+      'Running 2 of 4: Home page: Tab order, Keyboard walker. So far: 1 passed, 0 failed, 0 errors.',
+      'Running 3 of 4: Other, Keyboard walker. So far: 1 passed, 1 failed, 0 errors.',
+    ]);
+  });
+
+  it('shows nothing when the server has no progress for the run', async () => {
+    const ui = await setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': { status: 200, body: CATALOG }, [`GET /runs/${RUN_ID}`]: running, [`GET /runs/${RUN_ID}/progress`]: { status: 200, body: { progress: null } } } });
+    await until(() => ui.requests.some((r) => r.path.endsWith('/progress')), 'a progress request');
+    await new Promise((r) => setTimeout(r, 20));
+    expect(box()).toBe('');
+  });
+
+  it('asks for progress only while the run is running', async () => {
+    const ui = await setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': { status: 200, body: CATALOG }, [`GET /runs/${RUN_ID}`]: { status: 200, body: { run: run() } } } });
+    await until(() => !!document.querySelector('#status-heading'), 'the run');
+    await new Promise((r) => setTimeout(r, 30));
+    expect(ui.requests.some((r) => r.path.endsWith('/progress'))).toBe(false);
+  });
+
+  it('writes durations the way people say them', () => {
+    expect(duration(45)).toBe('45 s');
+    expect(duration(80)).toBe('1 min 20 s');
+    expect(duration(900)).toBe('15 min');
+    expect(duration(-3)).toBe('0 s');
   });
 });

@@ -169,12 +169,14 @@ export function childEnv(env = process.env, overrides = {}) {
  * server must then run as root, as it does in the Docker image.
  *
  * @param {object} job
- * @param {{ timeoutMs?: number, signal?: AbortSignal, killAfterMs?: number, runAs?: { uid: number, gid: number, home?: string } | null, child?: string, log?: Pick<Console, "log" | "error"> }} [options]
+ * @param {{ timeoutMs?: number, signal?: AbortSignal, killAfterMs?: number, runAs?: { uid: number, gid: number, home?: string } | null, child?: string, log?: Pick<Console, "log" | "error">, onEvent?: (event: { kind: string, journey: string, mode: string, step?: string, n?: number, status?: string }) => void }} [options]
  *   `child`: the program to run instead of run-child.js (the tests give their own); `log`: where
- *   the run process's own output goes, quoted and bounded
+ *   the run process's own output goes, quoted and bounded; `onEvent`: told, as the run goes, of
+ *   { kind: "start", journey, mode }, { kind: "step", journey, mode, step, n } and
+ *   { kind: "result", journey, mode, status }, each checked first (the run's page shows them)
  * @returns {Promise<{ outcome: string, error: string | null, results: any[], blocked: string[] }>}
  */
-export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs = null, child: program = CHILD, log = console } = {}) {
+export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs = null, child: program = CHILD, log = console, onEvent = () => {} } = {}) {
   return new Promise((resolve) => {
     const results = [];
     const blocked = [];
@@ -243,6 +245,15 @@ export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs =
         const r = message.result;
         results.push({ journey: r.journey, name: r.name, mode: r.mode, status: r.status, error: r.error, checks_total: r.checks_total, checks_passed: r.checks_passed, errors: r.errors, warnings: r.warnings, report_base: r.report_base });
         blocked.push(...refused);
+        onEvent({ kind: "result", journey: r.journey, mode: r.mode, status: r.status });
+      } else if (message?.type === "progress") {
+        // Where the run is: for one of the job's journeys and modes, not yet finished; a step is
+        // short text and a count. Nothing else is passed on.
+        const key = `${message.journey}\n${message.mode}`;
+        if (!expected.has(key) || taken.has(key)) return malformed();
+        if (message.step === undefined) return onEvent({ kind: "start", journey: message.journey, mode: message.mode });
+        if (!isText(message.step, 200) || !isCount(message.n)) return malformed();
+        onEvent({ kind: "step", journey: message.journey, mode: message.mode, step: message.step.toWellFormed(), n: message.n });
       } else if (message?.type === "done") {
         close();
         outcome ??= "done";

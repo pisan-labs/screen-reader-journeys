@@ -176,6 +176,11 @@ export function createWorker({
   let stopping = false;
   let loop = null;
   let current = null; // AbortController of the run in progress
+  /**
+   * Where the run in progress is, for its page (GET /runs/:id/progress): held here only while it
+   * runs, from the run process's checked events (execute.js, onEvent).
+   */
+  let live = null;
   const probing = new AbortController(); // ends the sandbox probe when the worker stops
   let wake = () => {};
 
@@ -474,7 +479,24 @@ export function createWorker({
         chromiumSandbox: config.chromiumSandbox,
       };
       const runAs = config.runAs ? { ...config.runAs, home: dirs.home } : null;
-      const outcome = await execute(job, { timeoutMs: config.runTimeoutMs, signal: current.signal, runAs, log });
+      live = { runId: run.id, startedAt: new Date().toISOString(), of: job.journeys.length * job.modes.length, journey: null, mode: null, step: null, n: null, done: 0, passed: 0, failed: 0, errored: 0 };
+      const onEvent = (event) => {
+        if (!live || live.runId !== run.id) return;
+        if (event.kind === "start") Object.assign(live, { journey: event.journey, mode: event.mode, step: null, n: null });
+        else if (event.kind === "step") Object.assign(live, { step: event.step, n: event.n });
+        else if (event.kind === "result") {
+          live.done += 1;
+          if (event.status === "pass") live.passed += 1;
+          else if (event.status === "fail") live.failed += 1;
+          else live.errored += 1;
+        }
+      };
+      let outcome;
+      try {
+        outcome = await execute(job, { timeoutMs: config.runTimeoutMs, signal: current.signal, runAs, log, onEvent });
+      } finally {
+        live = null;
+      }
       if (outcome.blocked.some(isByteLimit)) log.log(`run ${run.id}: the network guard's byte limit closed its connections`);
       if (outcome.outcome === "aborted") {
         // The server is shutting down (a deploy, say): put the run back for the next instance.
@@ -624,6 +646,12 @@ export function createWorker({
       current?.abort();
       wake();
       await loop;
+    },
+    /** The progress of run `runId`, if this worker is running it now; null otherwise. */
+    progressOf(runId) {
+      if (!live || live.runId !== runId) return null;
+      const { journey, mode, step, n, done, of, passed, failed, errored, startedAt } = live;
+      return { journey, mode, step, n, index: Math.min(done + 1, of), of, done, passed, failed, errored, started_at: startedAt, time_limit_s: Math.round(config.runTimeoutMs / 1000) };
     },
     get busy() {
       return current !== null;
