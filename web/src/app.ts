@@ -45,6 +45,8 @@ export interface RunSummary {
   errored?: number;
   files?: string[];
   skipped_files?: string[];
+  /** How many files were not kept in all; skipped_files names at most 20 of them. */
+  skipped_count?: number;
   blocked_requests?: string[];
 }
 export interface RunResult {
@@ -529,6 +531,7 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
     const results = run.run_results ?? [];
     const files = run.summary?.files ?? [];
     const skipped = run.summary?.skipped_files ?? [];
+    const unnamed = Math.max(0, (run.summary?.skipped_count ?? skipped.length) - skipped.length);
     const blocked = run.summary?.blocked_requests ?? [];
     const download = (path: string, text: Child) =>
       available.has(path) ? h('button', { type: 'button', class: 'link-button', onclick: () => void downloadReport(run.id, path) }, text) : null;
@@ -580,6 +583,7 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
             h('h2', {}, 'Files not kept'),
             h('p', {}, 'These files were not kept: too large, too many, or a name or type a report cannot have.'),
             h('ul', {}, skipped.map((path) => h('li', {}, path))),
+            unnamed ? h('p', {}, `And ${unnamed} more.`) : null,
           ]
         : null,
       blocked.length
