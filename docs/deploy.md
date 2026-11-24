@@ -316,7 +316,9 @@ domain only you control, where you can.
       exec afterwards, so the kernel marks it non-dumpable and a process of that user cannot
       trace it or fake its result. That holds only while the host's `fs.suid_dumpable` is 0 or 2,
       so **with `RUN_AS_UID` set, the worker does not start** (the server exits with a message)
-      if `/proc/sys/fs/suid_dumpable` reads anything else or cannot be read. Root ends the
+      if `/proc/sys/fs/suid_dumpable` reads anything else or cannot be read, and the helper
+      reads it again each time before it becomes the user: for anything else it gives no proof,
+      so the stop fails as below. Root ends the
       helper after a second if it is stopped. The stop returns only after a pass whose helper ran
       to the end and a scan after it that finds no live thread of that user; one empty scan is
       never taken as proof;

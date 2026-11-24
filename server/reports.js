@@ -160,15 +160,40 @@ export async function processesOf(uid, procDir = "/proc") {
  */
 const KILL_ALL = `try { process.kill(-1, "SIGKILL"); process.exit(0); } catch (e) { process.exit(e && e.code === "ESRCH" ? 0 : 2); }`;
 
+const SUID_DUMPABLE = "/proc/sys/fs/suid_dumpable";
+
+/**
+ * The kill helper drops to the run's user without an exec, so the kernel marks it non-dumpable
+ * and that user can neither trace it nor write its memory, but only while the host's
+ * fs.suid_dumpable is 0 or 2. With 1, a process of that user could make the helper report a
+ * kill(-1) it never sent. Returns the problem to report, or null if the setting is safe.
+ *
+ * @param {() => string} [read] reads /proc/sys/fs/suid_dumpable (the tests give their own)
+ * @returns {string | null}
+ */
+export function suidDumpableProblem(read = () => readFileSync(SUID_DUMPABLE, "utf8")) {
+  let value;
+  try {
+    value = String(read()).trim();
+  } catch (error) {
+    return `cannot read /proc/sys/fs/suid_dumpable (${error?.code ?? error?.message}), so a run's processes could not be stopped safely`;
+  }
+  if (value === "0" || value === "2") return null;
+  return `the host's fs.suid_dumpable is ${JSON.stringify(value)}: with anything but 0 or 2 a run's processes could trace the helper that stops them. Set it to 0 or 2 on the host`;
+}
+
 /**
  * The helper starts as root and becomes the user only inside itself, with no exec afterwards. A
  * process the user started could otherwise trace it while node starts (it would be the user's
  * own, traceable program) and make it exit 0 without the kill. As root it cannot be traced by
- * the user, and after setuid() the kernel marks it not dumpable, so it still cannot. A failure
- * to change user exits 4 (no proof).
+ * the user, and after setuid() the kernel marks it not dumpable, so it still cannot, as long as
+ * the host's fs.suid_dumpable is 0 or 2: the helper reads it first (as root) and exits 4 (no
+ * proof) for anything else, as for a failure to change user. The worker also refuses to start on
+ * such a host (suidDumpableProblem); this catches a setting changed while it runs.
  */
-const dropTo = (uid, gid) =>
-  `try { process.setgroups([]); process.setgid(${Number(gid)}); process.setuid(${Number(uid)}); } catch { process.exit(4); }
+const dropTo = (uid, gid, suidDumpable = SUID_DUMPABLE) =>
+  `try { const d = require("fs").readFileSync(${JSON.stringify(suidDumpable)}, "utf8").trim(); if (d !== "0" && d !== "2") process.exit(4); } catch { process.exit(4); }
+try { process.setgroups([]); process.setgid(${Number(gid)}); process.setuid(${Number(uid)}); } catch { process.exit(4); }
 if (process.getuid() !== ${Number(uid)} || process.geteuid() !== ${Number(uid)}) process.exit(4);
 `;
 
@@ -183,33 +208,14 @@ if (process.getuid() !== ${Number(uid)} || process.geteuid() !== ${Number(uid)})
  *
  * @param {number} uid
  * @param {number} gid
- * @param {{ limitMs?: number, program?: string }} [options] `program`: what the helper runs once
- *   it is the user (the tests give it one that never ends)
+ * @param {{ limitMs?: number, program?: string, suidDumpable?: string }} [options] `program`: what
+ *   the helper runs once it is the user (the tests give it one that never ends); `suidDumpable`:
+ *   the file it reads fs.suid_dumpable from (the tests give their own)
  * @returns {Promise<boolean>}
  */
-/**
- * The kill helper drops to the run's user without an exec, so the kernel marks it non-dumpable
- * and that user can neither trace it nor write its memory, but only while the host's
- * fs.suid_dumpable is 0 or 2. With 1, a process of that user could make the helper report a
- * kill(-1) it never sent. Returns the problem to report, or null if the setting is safe.
- *
- * @param {() => string} [read] reads /proc/sys/fs/suid_dumpable (the tests give their own)
- * @returns {string | null}
- */
-export function suidDumpableProblem(read = () => readFileSync("/proc/sys/fs/suid_dumpable", "utf8")) {
-  let value;
-  try {
-    value = String(read()).trim();
-  } catch (error) {
-    return `cannot read /proc/sys/fs/suid_dumpable (${error?.code ?? error?.message}), so a run's processes could not be stopped safely`;
-  }
-  if (value === "0" || value === "2") return null;
-  return `the host's fs.suid_dumpable is ${JSON.stringify(value)}: with anything but 0 or 2 a run's processes could trace the helper that stops them. Set it to 0 or 2 on the host`;
-}
-
-export function killAllOf(uid, gid, { limitMs = 1000, program = KILL_ALL } = {}) {
+export function killAllOf(uid, gid, { limitMs = 1000, program = KILL_ALL, suidDumpable = SUID_DUMPABLE } = {}) {
   return new Promise((resolve) => {
-    const helper = spawn(process.execPath, ["-e", dropTo(uid, gid) + program], { env: {}, cwd: "/", stdio: "ignore" });
+    const helper = spawn(process.execPath, ["-e", dropTo(uid, gid, suidDumpable) + program], { env: {}, cwd: "/", stdio: "ignore" });
     const timer = setTimeout(() => helper.kill("SIGKILL"), limitMs);
     const done = (code, signal) => {
       clearTimeout(timer);

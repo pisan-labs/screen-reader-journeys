@@ -283,6 +283,28 @@ for (;;) {
     assert.deepEqual(await processesOf(10001), []);
   });
 
+  it("gives no proof, and kills nothing, where fs.suid_dumpable would leave the helper traceable (R2.H-2)", { skip: !root && "needs root, as in the Docker image" }, async () => {
+    const folder = await mkdtemp(join(tmpdir(), "srj-dumpable-"));
+    const setting = join(folder, "suid_dumpable");
+    const child = spawn("sleep", ["60"], { uid: 10001, gid: 10001, detached: true, stdio: "ignore" });
+    const exited = new Promise((resolve) => child.on("exit", (code, signal) => resolve(signal)));
+    try {
+      await until(() => live(child.pid));
+      for (const value of ["1\n", "", "x"]) {
+        await writeFile(setting, value);
+        assert.equal(await killAllOf(10001, 10001, { suidDumpable: setting }), false, `no proof with ${JSON.stringify(value)}`);
+        assert.ok(await live(child.pid), "the helper exited before its kill(-1)");
+      }
+      assert.equal(await killAllOf(10001, 10001, { suidDumpable: join(folder, "missing") }), false, "no proof when it cannot be read");
+      await writeFile(setting, "2\n");
+      assert.equal(await killAllOf(10001, 10001, { suidDumpable: setting }), true, "2 is safe");
+      assert.equal(await exited, "SIGKILL");
+    } finally {
+      await stopUserProcesses(10001);
+      await rm(folder, { recursive: true, force: true });
+    }
+  });
+
   let cc = false;
   try {
     execFileSync("cc", ["--version"], { stdio: "ignore" });
