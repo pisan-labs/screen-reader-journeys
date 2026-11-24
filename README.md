@@ -28,7 +28,7 @@ mode heard", not as what every user hears.
 
 ## Quick start
 
-Needs Node.js 20.10 or later.
+Needs Node.js 22.8 or later (the coverage gate uses its `--test-coverage-*` options).
 
 ```bash
 npm ci
