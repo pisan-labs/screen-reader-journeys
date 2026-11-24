@@ -329,7 +329,7 @@ describe('the dashboard', () => {
           { status: 200, body: { run: run({ status: 'queued', summary: null, run_results: [], started_at: null, finished_at: null }) } },
           { status: 503, body: { error: 'restarting' } },
           { status: 200, body: { run: run({ status: 'running', summary: null, run_results: [], finished_at: null }) } },
-          { status: 200, body: { run: run({ summary: { passed: 1, files: ['home-page-tab-order.walker.md', 'summary.md'], skipped_files: ['huge.json'], blocked_requests: ['10.0.0.1:80 (private)'] } }) } },
+          { status: 200, body: { run: run({ summary: { passed: 1, files: ['home-page-tab-order.walker.md', 'summary.md'], skipped_files: ['huge.json'], skipped_count: 3, blocked_requests: ['10.0.0.1:80 (private)'] } }) } },
         ],
       },
     });
@@ -344,7 +344,7 @@ describe('the dashboard', () => {
     const button = [...view().querySelectorAll('button')].find((b) => b.textContent?.startsWith('Download'))!;
     expect(button.textContent).toBe('Download the report for Home page: Tab order, Keyboard walker');
     expect(view().textContent).not.toMatch(/The server sleeps/);
-    expect(view().textContent).toMatch(/Files not kept.*too large, too many, or a name or type a report cannot have.*huge\.json/);
+    expect(view().textContent).toMatch(/Files not kept.*too large, too many, or a name or type a report cannot have.*huge\.json.*And 2 more\./);
     expect(view().textContent).toMatch(/Blocked requests.*10\.0\.0\.1:80/);
     expect(view().textContent).toMatch(/2 of 2.*1 error, 0 warnings/);
   });

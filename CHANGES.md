@@ -53,3 +53,7 @@ Append-only journal, oldest first. Earlier history: `git log` and `docs/handoff.
 2026-11-24 [decision] PManager: #12 merged at a12086b; R2.H-1 to R2.H-3 and #12's minors R3.1 to R3.5 go in PR 4, from main; one release after PR 4 merges.
 
 2026-11-24 [code] PR 4: CI runs the root-only tests as root; index.js is measured; Node-only lint globals for server/; engines Node >=22.8; the run child forks with no execArgv.
+
+2026-11-24 [decision] PManager: #13 merged as b8e95fe; R4.1 to R4.3 go in a small follow-up PR that does not block the release.
+
+2026-11-24 [code] R4.1 to R4.3: saving reports is bounded in time and stops at the 200-file cap; tests use an injected clock; no persisted CI token.

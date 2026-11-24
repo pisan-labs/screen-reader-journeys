@@ -2,6 +2,7 @@
 // swapped for links are never read, and every process of the run's user is stopped first.
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { link, mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -548,8 +549,9 @@ describe("suidDumpableProblem (R2.H-2)", () => {
     );
   });
 
-  it("reads this host's setting by default", () => {
-    const value = execFileSync("cat", ["/proc/sys/fs/suid_dumpable"], { encoding: "utf8" }).trim();
+  const hasSetting = existsSync("/proc/sys/fs/suid_dumpable");
+  it("reads this host's setting by default", { skip: !hasSetting && "no /proc/sys/fs/suid_dumpable here (not Linux)" }, () => {
+    const value = readFileSync("/proc/sys/fs/suid_dumpable", "utf8").trim();
     assert.equal(suidDumpableProblem() === null, value === "0" || value === "2");
   });
 });

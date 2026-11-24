@@ -21,6 +21,18 @@ const REPORT_PATH = /^[A-Za-z0-9][A-Za-z0-9._-]*(\/[A-Za-z0-9][A-Za-z0-9._-]*)*$
 /** How long reading all of a run's reports through the run user's child may take, in all. */
 export const READ_LIMIT_MS = 120 * 1000;
 
+/**
+ * How long saving a run's reports may take in all, the database's writes included. Files still
+ * waiting then are left out, so a run that wrote thousands of files cannot hold the worker.
+ */
+export const SAVE_LIMIT_MS = 5 * 60 * 1000;
+
+/** The database keeps at most this many report files per run (worker_save_report). */
+export const MAX_REPORT_FILES = 200;
+
+/** At most this many left-out files are named in a run's summary; the rest are counted. */
+const SKIPPED_NAMED = 20;
+
 /** A list of paths as the run user's child may answer it: relative, short, no "..", no NUL. */
 function pathList(value, what) {
   if (!Array.isArray(value) || value.length > 100000) throw new Error(`report child: ${what} is not a list of paths`);
@@ -68,7 +80,8 @@ export function summarizeRun({ results, blocked, outcome }, files, skipped = [])
     errors: results.reduce((sum, r) => sum + r.errors, 0),
     warnings: results.reduce((sum, r) => sum + r.warnings, 0),
     files,
-    ...(skipped.length ? { skipped_files: skipped } : {}),
+    // Named up to a limit, so a run that wrote thousands of files still fits the summary's 64 KiB.
+    ...(skipped.length ? { skipped_files: skipped.slice(0, SKIPPED_NAMED), skipped_count: skipped.length } : {}),
     blocked_requests: [...new Set(blocked)].slice(0, 50),
     timed_out: outcome === "timeout",
   };
@@ -86,6 +99,8 @@ export function summarizeRun({ results, blocked, outcome }, files, skipped = [])
  *   exit?: (code: number) => void,
  *   startChild?: typeof startReportChild,
  *   readLimitMs?: number,
+ *   saveLimitMs?: number,
+ *   now?: () => number,
  *   readSuidDumpable?: () => string,
  * }} options
  */
@@ -100,6 +115,8 @@ export function createWorker({
   exit = (code) => process.exit(code),
   startChild = startReportChild,
   readLimitMs = READ_LIMIT_MS,
+  saveLimitMs = SAVE_LIMIT_MS,
+  now = () => performance.now(),
   readSuidDumpable = undefined,
 }) {
   let stopping = false;
@@ -173,7 +190,8 @@ export function createWorker({
     const access = reportAccess();
     // One limit for all the child's answers together, not only for each request, and not for
     // the database's writes in between: when it is used up, the child is ended, its pending
-    // answer fails, and so does the run.
+    // answer fails, and so does the run. Time is measured on a monotonic clock (`now`), which a
+    // change of the wall clock does not move.
     let budget = readLimitMs;
     /** @type {<A extends any[], R>(call: (...args: A) => Promise<R>) => (...args: A) => Promise<R>} */
     const timed = (call) => async (...args) => {
@@ -181,29 +199,36 @@ export function createWorker({
         access.close();
         throw new Error(`reading the reports took longer than ${readLimitMs} ms`);
       }
-      const started = Date.now();
+      const started = now();
       const limit = setTimeout(() => access.close(), budget);
       try {
         return await call(...args);
       } finally {
         clearTimeout(limit);
-        budget -= Date.now() - started;
+        budget -= now() - started;
       }
     };
+    // And one limit for the whole save, the database's writes included.
+    const saveStarted = now();
+    const overtime = () => now() - saveStarted >= saveLimitMs;
     try {
-      return await saveReportsWith({ list: timed(access.list), read: timed(access.read) }, runId, dir, { realRoot, uid });
+      return await saveReportsWith({ list: timed(access.list), read: timed(access.read) }, runId, dir, { realRoot, uid }, overtime);
     } finally {
       access.close();
     }
   }
 
-  async function saveReportsWith(access, runId, dir, { realRoot, uid }) {
+  async function saveReportsWith(access, runId, dir, { realRoot, uid }, overtime) {
     const saved = [];
     const skipped = [];
     const leaveOut = (file, why) => {
       skipped.push(file);
       log.log(`run ${runId}: left out ${file} (${why})`);
     };
+    // Once the run's reports are full, or the save has taken too long, every file still waiting
+    // is left out without asking the child or the database, and logged once, not one by one.
+    let full = null;
+    let leftQuietly = 0;
     const { files, others } = await access.list(dir);
     for (const file of others) leaveOut(file, "a link or other non-file");
     for (const file of files) {
@@ -214,6 +239,13 @@ export function createWorker({
       }
       if (file.length > 200 || !REPORT_PATH.test(file)) {
         leaveOut(file, "a name the database does not take");
+        continue;
+      }
+      if (!full && saved.length >= MAX_REPORT_FILES) full = `the run keeps at most ${MAX_REPORT_FILES} report files`;
+      if (!full && overtime()) full = `saving the reports took longer than ${Math.round(saveLimitMs / 1000)} s`;
+      if (full) {
+        skipped.push(file);
+        leftQuietly += 1;
         continue;
       }
       const read = await access.read(dir, file, { realRoot, uid });
@@ -230,11 +262,16 @@ export function createWorker({
       } catch (error) {
         if (!REFUSALS.has(error.code)) throw error;
         leaveOut(file, error.message);
+        // The cap on files (the database counts every file of the run, also from an earlier
+        // attempt): no later file would be kept either. After the cap on bytes, a smaller file
+        // still may be, so the next one is tried.
+        if (error.code === "54000" && /at most \d+ report files/.test(error.message)) full = error.message;
         continue;
       }
       if (!kept) break; // the run was deleted
       saved.push(file);
     }
+    if (leftQuietly) log.log(`run ${runId}: left out ${leftQuietly} more files (${full})`);
     skipped.sort();
     return { saved, skipped };
   }

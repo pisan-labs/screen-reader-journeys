@@ -16,7 +16,7 @@ import { loadCatalog, REPO_ROOT } from "../server/catalog.js";
 import { childEnv, executeRun } from "../server/execute.js";
 import { timeoutFetch } from "../server/timeout-fetch.js";
 import { parseAllowedHosts } from "../server/hosts.js";
-import { MAX_REPORT_BYTES, createWorker } from "../server/worker.js";
+import { MAX_REPORT_BYTES, MAX_REPORT_FILES, createWorker } from "../server/worker.js";
 import { workerDb } from "../server/worker-db.js";
 import { clearFolders, handle } from "../server/report-child.js";
 import { WORKER_TOKEN, fakeSupabase } from "./helpers/fake-supabase.js";
@@ -552,16 +552,20 @@ describe("worker, with a fake run process", () => {
       }
     });
 
+    // The limits below are measured on an injected clock (`now`), which the fakes move: no test
+    // waits on real time.
+    const files = (...names) => async (outDir) => {
+      for (const name of names) await writeFile(join(outDir, name), `# ${name}`);
+    };
+
     it("counts only the child's answers against the read limit, not the database's writes (R2.H-3)", async () => {
       const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
       const fake = fakeSupabase({ runs: [run] });
+      const clock = { t: 0 };
       const db = dbOf(fake);
-      const slowDb = { ...db, saveReport: async (...args) => (await new Promise((r) => setTimeout(r, 150)), db.saveReport(...args)) };
-      const { execute } = withFolder(async (outDir) => {
-        await writeFile(join(outDir, "summary.md"), "# Summary");
-        await writeFile(join(outDir, "second.md"), "# Second");
-      });
-      await createWorker({ db: slowDb, catalog, config: own(), execute, lookup, log: quiet, stopProcesses: async () => {}, startChild: fakeChild([]), readLimitMs: 100, exit: () => {} }).tick();
+      const slowDb = { ...db, saveReport: async (...args) => ((clock.t += 150), db.saveReport(...args)) };
+      const { execute } = withFolder(files("summary.md", "second.md"));
+      await createWorker({ db: slowDb, catalog, config: own(), execute, lookup, log: quiet, stopProcesses: async () => {}, startChild: fakeChild([]), readLimitMs: 100, now: () => clock.t, exit: () => {} }).tick();
       assert.equal(fake.run(run.id).status, "done");
       assert.deepEqual(fake.tables.run_reports.map((r) => r.path).sort(), ["second.md", "summary.md"]);
     });
@@ -569,14 +573,72 @@ describe("worker, with a fake run process", () => {
     it("adds up the child's answers against the read limit (R2.H-3)", async () => {
       const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
       const fake = fakeSupabase({ runs: [run] });
-      // Each read takes 60 ms, under the limit of 100 ms; the two together do not.
-      const answer = async (request) => (request.op === "read" ? (await new Promise((r) => setTimeout(r, 60)), handle(request)) : handle(request));
-      const { execute } = withFolder(async (outDir) => {
-        await writeFile(join(outDir, "summary.md"), "# Summary");
-        await writeFile(join(outDir, "second.md"), "# Second");
-      });
-      await createWorker({ db: dbOf(fake), catalog, config: own(), execute, lookup, log: quiet, stopProcesses: async () => {}, startChild: fakeChild([], answer), readLimitMs: 100, exit: () => {} }).tick();
+      const clock = { t: 0 };
+      // Each read takes 60 of the 100 allowed: the second ends over the limit, so a third may not start.
+      const answer = async (request) => {
+        if (request.op === "read") clock.t += 60;
+        return handle(request);
+      };
+      const requests = [];
+      const { execute } = withFolder(files("a.md", "b.md", "c.md"));
+      await createWorker({ db: dbOf(fake), catalog, config: own(), execute, lookup, log: quiet, stopProcesses: async () => {}, startChild: fakeChild(requests, answer), readLimitMs: 100, now: () => clock.t, exit: () => {} }).tick();
       assert.equal(fake.run(run.id).status, "failed");
+      assert.equal(requests.filter((r) => r.op === "read").length, 2, "the third read was never sent");
+    });
+
+    it("bounds the whole save in time, database writes included, and leaves out what is still waiting (R4.1)", async () => {
+      const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+      const fake = fakeSupabase({ runs: [run] });
+      const clock = { t: 0 };
+      const db = dbOf(fake);
+      let calls = 0;
+      const slowDb = { ...db, saveReport: async (...args) => ((calls += 1), (clock.t += 2000), db.saveReport(...args)) };
+      const lines = [];
+      const { execute } = withFolder(files("a.md", "b.md", "c.md", "d.md"));
+      await createWorker({ db: slowDb, catalog, config: own(), execute, lookup, log: { log: (m) => lines.push(m), error() {} }, stopProcesses: async () => {}, startChild: fakeChild([]), saveLimitMs: 3000, now: () => clock.t, exit: () => {} }).tick();
+      assert.equal(fake.run(run.id).status, "done");
+      assert.equal(calls, 2, "no write once the limit had passed");
+      assert.deepEqual(fake.run(run.id).summary.skipped_files, ["c.md", "d.md"]);
+      assert.equal(lines.filter((m) => m.includes("left out")).length, 1, "logged once, not file by file");
+      assert.ok(lines.some((m) => m.includes("left out 2 more files (saving the reports took longer than 3 s)")), lines.join("\n"));
+    });
+
+    it(`stops asking the database once ${MAX_REPORT_FILES} files are kept (R4.1)`, async () => {
+      const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+      const fake = fakeSupabase({ runs: [run] });
+      const db = dbOf(fake);
+      let calls = 0;
+      const countingDb = { ...db, saveReport: async (...args) => ((calls += 1), db.saveReport(...args)) };
+      const names = Array.from({ length: MAX_REPORT_FILES + 30 }, (_, i) => `r${String(i).padStart(3, "0")}.md`);
+      const requests = [];
+      const { execute } = withFolder(files(...names));
+      await createWorker({ db: countingDb, catalog, config: own(), execute, lookup, log: quiet, stopProcesses: async () => {}, startChild: fakeChild(requests), exit: () => {} }).tick();
+      assert.equal(fake.run(run.id).status, "done");
+      assert.equal(calls, MAX_REPORT_FILES);
+      assert.equal(requests.filter((r) => r.op === "read").length, MAX_REPORT_FILES, "nor the child");
+      const { summary } = fake.run(run.id);
+      assert.equal(summary.skipped_count, 30);
+      assert.equal(summary.skipped_files.length, 20, "named up to 20, counted in full");
+    });
+
+    it("stops asking the database once it refuses a file for the cap on files (R4.1)", async () => {
+      const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+      const fake = fakeSupabase({ runs: [run] });
+      const db = dbOf(fake);
+      let calls = 0;
+      const cappedDb = {
+        ...db,
+        saveReport: async (...args) => {
+          calls += 1;
+          if (calls === 2) throw Object.assign(new Error("worker_save_report: A run keeps at most 200 report files."), { code: "54000" });
+          return db.saveReport(...args);
+        },
+      };
+      const { execute } = withFolder(files("a.md", "b.md", "c.md", "d.md"));
+      await createWorker({ db: cappedDb, catalog, config: own(), execute, lookup, log: quiet, stopProcesses: async () => {}, startChild: fakeChild([]), exit: () => {} }).tick();
+      assert.equal(fake.run(run.id).status, "done");
+      assert.equal(calls, 2);
+      assert.deepEqual(fake.run(run.id).summary.skipped_files, ["b.md", "c.md", "d.md"]);
     });
 
     it("does not start on a host where the run's user could trace the stop helper (R2.H-2)", async () => {
@@ -767,6 +829,25 @@ describe("run process environment", () => {
     const env = childEnv({ PATH: "/bin", HOME: "/home/x", PLAYWRIGHT_BROWSERS_PATH: "/ms-playwright", SUPABASE_URL: "u", SUPABASE_SERVICE_ROLE_KEY: "k", SUPABASE_ANON_KEY: "a", WORKER_TOKEN: "w", GITHUB_TOKEN: "t", AWS_SECRET_ACCESS_KEY: "s", DB_PASSWORD: "p", DATABASE_URL: "postgres://u:p@h/db", RENDER_API: "x", PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK: "1" });
     assert.deepEqual(Object.keys(env).sort(), ["HOME", "PATH", "PLAYWRIGHT_BROWSERS_PATH"]);
     assert.equal(childEnv({ HOME: "/root" }, { HOME: "/tmp/run/home" }).HOME, "/tmp/run/home");
+  });
+
+  it("starts the run process without the server's node flags, so a .env it was started with stays out", async () => {
+    // A server started as `node --env-file-if-exists=.env` (npm run server:dev) has the file's
+    // variables, and fork would pass the flag on: the run process would read .env itself.
+    const folder = await mkdtemp(join(tmpdir(), "srj-execargv-"));
+    try {
+      await writeFile(join(folder, ".env"), "SRJ_PROBE_FROM_DOTENV=leaked\n");
+      const probe = join(folder, "probe.mjs");
+      await writeFile(probe, 'process.on("message", () => { process.send({ type: "result", result: { execArgv: process.execArgv, fromDotenv: process.env.SRJ_PROBE_FROM_DOTENV ?? null } }); process.send({ type: "done" }); process.disconnect(); });\n');
+      const execute = new URL("../server/execute.js", import.meta.url).href;
+      const parent = `import(${JSON.stringify(execute)}).then(async ({ executeRun }) => { const r = await executeRun({}, { timeoutMs: 10000, child: ${JSON.stringify(probe)} }); console.log(JSON.stringify(r)); });`;
+      const { stdout } = await promisify(execFile)(process.execPath, ["--env-file-if-exists=.env", "--input-type=module", "-e", parent], { cwd: folder, env: { PATH: process.env.PATH } });
+      const outcome = JSON.parse(stdout.trim().split("\n").pop());
+      assert.equal(outcome.outcome, "done", stdout);
+      assert.deepEqual(outcome.results, [{ execArgv: [], fromDotenv: null }]);
+    } finally {
+      await rm(folder, { recursive: true, force: true });
+    }
   });
 
   const root = process.getuid?.() === 0;

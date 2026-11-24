@@ -21,10 +21,13 @@ const freePort = () =>
     });
   });
 
-/** Start server/index.js with only `env` (and PATH, and the coverage folder when measuring). */
-function start(env) {
+/**
+ * Start server/index.js with only `env` (and PATH, and the coverage folder when measuring). With
+ * `as`, as that user.
+ */
+function start(env, as = null) {
   const inherited = Object.fromEntries(["PATH", "NODE_V8_COVERAGE"].filter((name) => process.env[name]).map((name) => [name, process.env[name]]));
-  const child = spawn(process.execPath, [INDEX], { env: { ...inherited, ...env }, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(process.execPath, [INDEX], { env: { ...inherited, ...env }, stdio: ["ignore", "pipe", "pipe"], ...(as ?? {}) });
   let output = "";
   child.stdout.on("data", (chunk) => (output += chunk));
   child.stderr.on("data", (chunk) => (output += chunk));
@@ -48,10 +51,14 @@ async function goodEnv(extra = {}) {
     WORKER_TOKEN,
     PORT: String(await freePort()),
     POLL_INTERVAL_SECONDS: "60",
-    ...(root ? { RUN_AS_UID: "10001" } : {}),
     ...extra,
   };
 }
+
+// Started by root, the server needs RUN_AS_UID, and then refuses a host whose fs.suid_dumpable is
+// not 0 or 2 (worker.js, start). So that the tests below do not depend on the host, root starts
+// them as an ordinary user (nobody) instead, which needs neither.
+const ordinary = root ? { uid: 65534, gid: 65534 } : null;
 
 describe("server/index.js", () => {
   it("refuses to start with a bad configuration, listing every problem", async () => {
@@ -63,7 +70,7 @@ describe("server/index.js", () => {
   });
 
   it("refuses the wrong user: root without RUN_AS_UID, or RUN_AS_UID without root", async () => {
-    const env = await goodEnv(root ? { RUN_AS_UID: "" } : { RUN_AS_UID: "10001" });
+    const env = await goodEnv(root ? {} : { RUN_AS_UID: "10001" });
     const { code, output } = await start(env).exited;
     assert.equal(code, 1);
     assert.match(output, root ? /RUN_AS_UID must name the unprivileged user/ : /only a server started as root/);
@@ -72,13 +79,13 @@ describe("server/index.js", () => {
   for (const signal of /** @type {const} */ (["SIGTERM", "SIGINT"])) {
     it(`listens, answers /health, and stops on ${signal}`, async () => {
       const env = await goodEnv();
-      const server = start(env);
+      const server = start(env, ordinary);
       try {
         await until(() => server.output().includes("listening on port"));
         const response = await fetch(`http://127.0.0.1:${env.PORT}/health`);
         assert.equal(response.status, 200);
         assert.equal((await response.json()).status, "ok");
-        if (!root) assert.match(server.output(), /the browser runs as this server's own user/);
+        assert.match(server.output(), /the browser runs as this server's own user/);
       } finally {
         server.child.kill(signal);
       }

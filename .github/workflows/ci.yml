@@ -13,6 +13,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Nothing here pushes or fetches, and the root step below opens the checkout's folders
+          # for traversal, so the job's token is not left in .git/config.
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22
