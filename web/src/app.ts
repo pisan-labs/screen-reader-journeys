@@ -367,7 +367,7 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
         'div',
         { class: 'field' },
         h('label', { for: 'base-url' }, 'Site address'),
-        h('p', { id: 'base-url-hint', class: 'hint' }, `Where the journeys start, for example a pull request's preview. ${allowed}`),
+        h('p', { id: 'base-url-hint', class: 'hint' }, `Where the journeys start, for example a pull request's preview. ${allowed} The page is opened by a browser on our server, over the public internet.`),
         baseUrl,
         errors.base_url,
       ),

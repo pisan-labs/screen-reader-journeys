@@ -191,6 +191,8 @@ describe('the dashboard', () => {
     await setup({ answers: { 'GET /journeys': { status: 200, body: { ...CATALOG, allowed_hosts: ['*'] } } } });
     await until(() => !!document.getElementById('base-url'), 'the form');
     expect(view().textContent).toMatch(/may test any public address, with http or https on ports 80 and 443\./);
+    // What happens to the page, said where the address is entered (PManager, 24 November).
+    expect(document.getElementById('base-url-hint')!.textContent).toMatch(/The page is opened by a browser on our server, over the public internet\.$/);
     expect(view().textContent).not.toMatch(/may test \*/);
   });
 

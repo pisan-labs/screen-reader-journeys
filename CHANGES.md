@@ -73,3 +73,7 @@ Append-only journal, oldest first. Earlier history: `git log` and `docs/handoff.
 2026-11-24 [code] #17 round 1: total of 40 runs a day (0002), 100 MB per run through the proxy, results bound to the job, quoted output, no ports on wildcard rules (R7.2 to R7.6).
 
 2026-11-24 [code] R7.1 (proposed option A): with "*", the worker starts only if CHROMIUM_SANDBOX=true and a sandboxed Chromium starts as the run user (sandbox-probe.js).
+
+2026-11-24 [decision] PManager (T1) on #17 round 1: R7.1 option A; total 40 a day; 100 MB per run; the dashboard says the page is opened by a browser on our server.
+
+2026-11-24 [code] #17 round 2: the run process has no IPC; job on stdin, messages as JSON lines on fd 3, at most 1 MB each; the dashboard sentence; "byte limit" in blocked.

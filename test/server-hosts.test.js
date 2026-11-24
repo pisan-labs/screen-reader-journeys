@@ -562,7 +562,7 @@ describe("the egress proxy connects to the checked address, and limits a run's b
       assert.ok(big.body.length < 5000, `cut short at the limit (${big.body.length} bytes arrived)`);
       assert.equal((await call(proxy, `http://127.0.0.1:${site.address().port}/`)).status, 403, "nothing more once full");
       assert.equal((await tunnel(proxy, `127.0.0.1:${echo.address().port}`)).status, 403);
-      assert.ok(proxy.blocked.some((b) => /reached its limit/.test(b)), proxy.blocked.join("\n"));
+      assert.ok(proxy.blocked.some((b) => /byte limit: the run moved its/.test(b)), proxy.blocked.join("\n"));
     } finally {
       await proxy.close();
     }
@@ -574,7 +574,7 @@ describe("the egress proxy connects to the checked address, and limits a run's b
       const { status, back } = await tunnel(proxy, `127.0.0.1:${echo.address().port}`, "y".repeat(2000));
       assert.equal(status, 200);
       assert.ok(back < 2000, `the echo was cut at the limit (${back} bytes came back)`);
-      assert.ok(proxy.blocked.some((b) => /reached its limit/.test(b)));
+      assert.ok(proxy.blocked.some((b) => /byte limit: the run moved its/.test(b)));
     } finally {
       await proxy.close();
     }

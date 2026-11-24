@@ -60,7 +60,7 @@ export async function startEgressProxy({ rules, lookup, idleMs = 60000, maxBytes
       moved += chunk.length;
       if (full || moved <= maxBytes) return;
       full = true;
-      blocked.push(`all connections (the run reached its limit of ${Math.round(maxBytes / 1024 / 1024)} MB through the network guard)`);
+      blocked.push(`all connections (byte limit: the run moved its ${Math.round(maxBytes / 1024 / 1024)} MB through the network guard)`);
       for (const each of open) each.destroy();
     });
 
