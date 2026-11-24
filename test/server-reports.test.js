@@ -6,7 +6,7 @@ import { link, mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/pr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
-import { checkReportsFolder, killAllOf, listReportFiles, processesOf, readReportFile, recordReportsFolder, startReportChild, stopUserProcesses } from "../server/reports.js";
+import { checkReportsFolder, killAllOf, listReportFiles, processesOf, readReportFile, recordReportsFolder, startReportChild, stopUserProcesses, suidDumpableProblem } from "../server/reports.js";
 
 const MARKER = "SECRET-MARKER-the-server-must-never-read-this";
 let base;
@@ -484,6 +484,50 @@ describe("the report child (reading and deleting as the run's user)", () => {
     const { readdir } = await import("node:fs/promises");
     assert.deepEqual(await readdir(join(folder, "reports")), []);
     await rm(folder, { recursive: true });
+  });
+
+  it("as the run's user, empties reports/ even when the run made reports/ itself read-only (R2.H-1)", { skip: !root && "needs root, as in the Docker image" }, async () => {
+    for (const mode of ["0500", "0000"]) {
+      const folder = await mkdtemp(join(tmpdir(), "srj-child-"));
+      execFileSync("chmod", ["0755", folder]);
+      await mkdir(join(folder, "reports", "sub"), { recursive: true });
+      await writeFile(join(folder, "reports", "sub", "x.md"), "x");
+      await writeFile(join(folder, "reports", "y.md"), "y");
+      execFileSync("chown", ["-R", "10001:10001", join(folder, "reports")]);
+      execFileSync("chmod", [mode, join(folder, "reports")]);
+      const child = startReportChild({ uid: 10001, gid: 10001 });
+      try {
+        assert.deepEqual(await child.call({ op: "clear", dirs: [join(folder, "reports")] }), { left: [] }, `reports/ at ${mode}`);
+      } finally {
+        child.close();
+      }
+      const { readdir } = await import("node:fs/promises");
+      assert.deepEqual(await readdir(join(folder, "reports")), []);
+      await rm(folder, { recursive: true });
+    }
+  });
+});
+
+describe("suidDumpableProblem (R2.H-2)", () => {
+  it("accepts 0 and 2, where the kernel makes the helper non-dumpable when it drops to the user", () => {
+    assert.equal(suidDumpableProblem(() => "0\n"), null);
+    assert.equal(suidDumpableProblem(() => "2\n"), null);
+  });
+
+  it("refuses 1, anything else, and a setting it cannot read", () => {
+    assert.match(suidDumpableProblem(() => "1\n"), /suid_dumpable is "1"/);
+    assert.match(suidDumpableProblem(() => ""), /suid_dumpable is ""/);
+    assert.match(
+      suidDumpableProblem(() => {
+        throw Object.assign(new Error("no such file"), { code: "ENOENT" });
+      }),
+      /cannot read .*ENOENT/
+    );
+  });
+
+  it("reads this host's setting by default", () => {
+    const value = execFileSync("cat", ["/proc/sys/fs/suid_dumpable"], { encoding: "utf8" }).trim();
+    assert.equal(suidDumpableProblem() === null, value === "0" || value === "2");
   });
 });
 

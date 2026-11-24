@@ -26,10 +26,15 @@ async function makeRemovable(path) {
   for (const name of await readdir(path).catch(() => [])) await makeRemovable(join(path, name));
 }
 
-/** Remove everything inside each folder (not the folder itself), as this process's user. */
+/**
+ * Remove everything inside each folder (not the folder itself), as this process's user. The
+ * folder and everything below it are made writable first, the folder itself included: the run
+ * may have made reports/ or home/ read-only.
+ */
 export async function clearFolders(dirs) {
   const left = [];
   for (const dir of dirs) {
+    await makeRemovable(dir);
     let names = [];
     try {
       names = await readdir(dir);
@@ -39,7 +44,6 @@ export async function clearFolders(dirs) {
     }
     for (const name of names) {
       try {
-        await makeRemovable(join(dir, name));
         await rm(join(dir, name), { recursive: true, force: true });
       } catch {
         left.push(join(dir, name));

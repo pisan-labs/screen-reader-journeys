@@ -430,13 +430,16 @@ describe("worker, with a fake run process", () => {
     const own = () => ({ ...config, runAs: { uid: process.getuid(), gid: process.getgid() } });
     /**
      * A stand-in for startReportChild: answers like the real child (report-child.js handle), or
-     * as `answer` says, and records each request. close() fails what is still waiting.
+     * as `answer` says, and records each request. close() fails what is still waiting, and, as
+     * with the real child, every call after it.
      */
     const fakeChild = (requests, answer = handle) => () => {
       const pending = new Set();
+      let closed = false;
       return {
         call(request) {
           requests.push(request);
+          if (closed) return Promise.reject(new Error("report child: the channel is closed"));
           return new Promise((resolve, reject) => {
             const entry = { reject };
             pending.add(entry);
@@ -447,6 +450,7 @@ describe("worker, with a fake run process", () => {
           });
         },
         close() {
+          closed = true;
           for (const { reject } of pending) reject(new Error("report child ended"));
           pending.clear();
         },
@@ -511,6 +515,85 @@ describe("worker, with a fake run process", () => {
       await createWorker({ db: dbOf(fake), catalog, config: own(), execute, lookup, log: quiet, stopProcesses: async () => {}, startChild: fakeChild([], answer), exit: () => {} }).tick();
       assert.equal(fake.run(run.id).status, "failed");
       assert.equal(fake.tables.run_reports.length, 0);
+    });
+
+    it("rejects a clear answer that names a path outside the folders asked for (R2.H-3)", async () => {
+      const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+      const fake = fakeSupabase({ runs: [run] });
+      const answer = (request) => (request.op === "clear" ? { left: ["/etc/passwd"] } : handle(request));
+      const { execute, workDir } = withFolder();
+      const errors = [];
+      const exits = [];
+      try {
+        await createWorker({ db: dbOf(fake), catalog, config: own(), execute, lookup, log: { log() {}, error: (m) => errors.push(m) }, stopProcesses: async () => {}, startChild: fakeChild([], answer), exit: (c) => exits.push(c) }).tick();
+        assert.ok(errors.some((m) => m.includes("a malformed answer to clear")), errors.join("\n"));
+        assert.deepEqual(exits, [1]);
+      } finally {
+        if (workDir()) await rm(workDir(), { recursive: true, force: true });
+      }
+    });
+
+    it("locks the folders away and ends the server when rmdir fails after an empty clear (R2.H-1)", async () => {
+      const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+      const fake = fakeSupabase({ runs: [run] });
+      // The child says it removed everything, but summary.md is still there, so rmdir fails.
+      const answer = (request) => (request.op === "clear" ? { left: [] } : handle(request));
+      const { execute, workDir } = withFolder((outDir) => writeFile(join(outDir, "summary.md"), "# Summary"));
+      const exits = [];
+      try {
+        await createWorker({ db: dbOf(fake), catalog, config: own(), execute, lookup, log: quiet, stopProcesses: async () => {}, startChild: fakeChild([], answer), exit: (c) => exits.push(c) }).tick();
+        const { statSync } = await import("node:fs");
+        const info = statSync(join(workDir(), "reports"));
+        assert.equal(info.mode & 0o777, 0o700);
+        assert.equal(info.uid, process.getuid());
+        assert.deepEqual(exits, [1]);
+      } finally {
+        if (workDir()) await rm(workDir(), { recursive: true, force: true });
+      }
+    });
+
+    it("counts only the child's answers against the read limit, not the database's writes (R2.H-3)", async () => {
+      const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+      const fake = fakeSupabase({ runs: [run] });
+      const db = dbOf(fake);
+      const slowDb = { ...db, saveReport: async (...args) => (await new Promise((r) => setTimeout(r, 150)), db.saveReport(...args)) };
+      const { execute } = withFolder(async (outDir) => {
+        await writeFile(join(outDir, "summary.md"), "# Summary");
+        await writeFile(join(outDir, "second.md"), "# Second");
+      });
+      await createWorker({ db: slowDb, catalog, config: own(), execute, lookup, log: quiet, stopProcesses: async () => {}, startChild: fakeChild([]), readLimitMs: 100, exit: () => {} }).tick();
+      assert.equal(fake.run(run.id).status, "done");
+      assert.deepEqual(fake.tables.run_reports.map((r) => r.path).sort(), ["second.md", "summary.md"]);
+    });
+
+    it("adds up the child's answers against the read limit (R2.H-3)", async () => {
+      const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+      const fake = fakeSupabase({ runs: [run] });
+      // Each read takes 60 ms, under the limit of 100 ms; the two together do not.
+      const answer = async (request) => (request.op === "read" ? (await new Promise((r) => setTimeout(r, 60)), handle(request)) : handle(request));
+      const { execute } = withFolder(async (outDir) => {
+        await writeFile(join(outDir, "summary.md"), "# Summary");
+        await writeFile(join(outDir, "second.md"), "# Second");
+      });
+      await createWorker({ db: dbOf(fake), catalog, config: own(), execute, lookup, log: quiet, stopProcesses: async () => {}, startChild: fakeChild([], answer), readLimitMs: 100, exit: () => {} }).tick();
+      assert.equal(fake.run(run.id).status, "failed");
+    });
+
+    it("does not start on a host where the run's user could trace the stop helper (R2.H-2)", async () => {
+      const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+      const fake = fakeSupabase({ runs: [run] });
+      const exits = [];
+      const errors = [];
+      const execute = async () => ({ outcome: "done", error: null, results: [], blocked: [] });
+      const worker = createWorker({ db: dbOf(fake), catalog, config: own(), execute, lookup, log: { log() {}, error: (m) => errors.push(m) }, stopProcesses: async () => {}, readSuidDumpable: () => "1\n", exit: (c) => exits.push(c) });
+      try {
+        await Promise.race([worker.start(), new Promise((r) => setTimeout(r, 500))]);
+        assert.deepEqual(exits, [1]);
+        assert.ok(errors.some((m) => m.includes("suid_dumpable")), errors.join("\n"));
+        assert.equal(fake.run(run.id).status, "queued", "no run was claimed");
+      } finally {
+        await worker.stop();
+      }
     });
 
     it("bounds the whole read, not only each request (R2.G-5)", async () => {

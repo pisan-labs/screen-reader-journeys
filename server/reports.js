@@ -17,7 +17,7 @@
 
 import { fork, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { constants } from "node:fs";
+import { constants, readFileSync } from "node:fs";
 import { lstat, open, readFile, readdir, realpath } from "node:fs/promises";
 import { dirname, join, relative, sep } from "node:path";
 
@@ -187,6 +187,26 @@ if (process.getuid() !== ${Number(uid)} || process.geteuid() !== ${Number(uid)})
  *   it is the user (the tests give it one that never ends)
  * @returns {Promise<boolean>}
  */
+/**
+ * The kill helper drops to the run's user without an exec, so the kernel marks it non-dumpable
+ * and that user can neither trace it nor write its memory, but only while the host's
+ * fs.suid_dumpable is 0 or 2. With 1, a process of that user could make the helper report a
+ * kill(-1) it never sent. Returns the problem to report, or null if the setting is safe.
+ *
+ * @param {() => string} [read] reads /proc/sys/fs/suid_dumpable (the tests give their own)
+ * @returns {string | null}
+ */
+export function suidDumpableProblem(read = () => readFileSync("/proc/sys/fs/suid_dumpable", "utf8")) {
+  let value;
+  try {
+    value = String(read()).trim();
+  } catch (error) {
+    return `cannot read /proc/sys/fs/suid_dumpable (${error?.code ?? error?.message}), so a run's processes could not be stopped safely`;
+  }
+  if (value === "0" || value === "2") return null;
+  return `the host's fs.suid_dumpable is ${JSON.stringify(value)}: with anything but 0 or 2 a run's processes could trace the helper that stops them. Set it to 0 or 2 on the host`;
+}
+
 export function killAllOf(uid, gid, { limitMs = 1000, program = KILL_ALL } = {}) {
   return new Promise((resolve) => {
     const helper = spawn(process.execPath, ["-e", dropTo(uid, gid) + program], { env: {}, cwd: "/", stdio: "ignore" });
