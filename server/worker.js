@@ -6,8 +6,9 @@ import { chmod, chown, lstat, mkdir, mkdtemp, rm, rmdir } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 import { findJourney } from "./catalog.js";
-import { executeRun } from "./execute.js";
-import { resolveEgress } from "./hosts.js";
+import { executeRun, probeSandbox as realProbeSandbox } from "./execute.js";
+import { BYTE_LIMIT_ENTRY } from "./egress-proxy.js";
+import { needsSandbox, resolveEgress } from "./hosts.js";
 import { clearFolders } from "./report-child.js";
 import { checkReportsFolder, listReportFiles, readReportFile, recordReportsFolder, startReportChild, stopUserProcesses, suidDumpableProblem } from "./reports.js";
 import { validateRunRequest } from "./validate.js";
@@ -50,11 +51,16 @@ const LOGGED_EACH = 30;
  * `text` cut to `max` characters in the middle, so its end (a file's extension, a refusal's
  * reason) still shows.
  */
+const isByteLimit = (entry) => typeof entry === "string" && entry.startsWith(BYTE_LIMIT_ENTRY);
+
 const cut = (text, max) => {
-  const chars = Array.from(text);
-  if (chars.length <= max) return text;
-  const tail = Math.floor((max - 1) / 4);
-  return `${chars.slice(0, max - 1 - tail).join("")}…${chars.slice(-tail).join("")}`;
+  const whole = String(text);
+  if (whole.length <= 2 * max) {
+    const points = Array.from(clean(whole));
+    if (points.length <= max) return points.join("");
+  }
+  const tail = Math.max(0, Math.floor((max - 1) / 4));
+  return `${headOf(whole, Math.max(0, max - 1 - tail))}…${tailOf(whole, tail)}`;
 };
 
 /** A list of paths as the run user's child may answer it: relative, short, no "..", no NUL. */
@@ -90,11 +96,22 @@ const CONTENT_TYPES = {
   ".txt": "text/plain; charset=utf-8",
 };
 
-// Both cut by code point, never inside a surrogate pair: half of one is not valid in jsonb, and
-// the database would refuse the whole run's record.
+// Text from the run process goes into the run's record, which the database refuses whole if a
+// string holds a lone surrogate or a NUL. So `clean` makes it well formed (U+FFFD for both), and
+// `short` and `cut` cut it by code point, never inside a surrogate pair. They look at a bounded
+// slice of their input only, however long it is.
+const clean = (text) => text.toWellFormed().replaceAll("\u0000", "\uFFFD");
+/** The first `n` code points of `text`, from a slice of at most 2n + 2 units. */
+const headOf = (text, n) => Array.from(clean(text.slice(0, 2 * n + 2))).slice(0, n).join("");
+/** The last `n` code points of `text`, from a slice of at most 2n + 2 units. */
+const tailOf = (text, n) => (n > 0 ? Array.from(clean(text.slice(-(2 * n + 2)))).slice(-n).join("") : "");
+
+/** The first line of `text`, cut to `max` code points with an ellipsis. */
 const short = (text, max = 500) => {
-  const line = Array.from(String(text ?? "").split("\n")[0]);
-  return line.length > max ? `${line.slice(0, max - 1).join("")}…` : line.join("");
+  const start = String(text ?? "").slice(0, 2 * max + 2);
+  const line = start.split("\n")[0];
+  const points = Array.from(clean(line));
+  return points.length > max ? `${points.slice(0, max - 1).join("")}…` : points.join("");
 };
 
 export function summarizeRun({ results, blocked, outcome }, files, skipped = []) {
@@ -108,7 +125,8 @@ export function summarizeRun({ results, blocked, outcome }, files, skipped = [])
     files,
     // Named up to a limit and counted in full, so a run that wrote thousands of files still fits.
     ...(skipped.length ? { skipped_files: skipped.slice(0, SKIPPED_NAMED).map((name) => cut(name, NAME_CHARS)), skipped_count: skipped.length } : {}),
-    blocked_requests: [...new Set(blocked)].slice(0, 50).map((entry) => cut(entry, BLOCKED_CHARS)),
+    // The byte limit's entry first, so neither the cap of 50 nor the size guard drops it.
+    blocked_requests: [...new Set([...blocked.filter(isByteLimit), ...blocked])].slice(0, 50).map((entry) => cut(entry, BLOCKED_CHARS)),
     timed_out: outcome === "timeout",
   };
   // Then, until it fits: fewer named files (one stays, so the page still says why), fewer blocked
@@ -136,6 +154,7 @@ export function summarizeRun({ results, blocked, outcome }, files, skipped = [])
  *   saveLimitMs?: number,
  *   now?: () => number,
  *   readSuidDumpable?: () => string,
+ *   probeSandbox?: (runAs: { uid: number, gid: number } | null, options?: { signal?: AbortSignal }) => Promise<string | null>,
  * }} options
  */
 export function createWorker({
@@ -152,10 +171,12 @@ export function createWorker({
   saveLimitMs = SAVE_LIMIT_MS,
   now = () => performance.now(),
   readSuidDumpable = undefined,
+  probeSandbox = realProbeSandbox,
 }) {
   let stopping = false;
   let loop = null;
   let current = null; // AbortController of the run in progress
+  const probing = new AbortController(); // ends the sandbox probe when the worker stops
   let wake = () => {};
 
   const failStaleRuns = () => db.failStaleRuns((config.runTimeoutMs + STALE_GRACE_MS) / 1000);
@@ -261,7 +282,8 @@ export function createWorker({
     let unlogged = 0;
     const leaveOut = (file, why) => {
       skipped.push(file);
-      if (skipped.length <= LOGGED_EACH) log.log(`run ${runId}: left out ${cut(file, NAME_CHARS)} (${why})`);
+      // Quoted, and the reason cut to its first line, so a name cannot forge a log line.
+      if (skipped.length <= LOGGED_EACH) log.log(`run ${runId}: left out ${JSON.stringify(cut(file, NAME_CHARS))} (${short(why, 300)})`);
       else unlogged += 1;
     };
     // Once the run's reports are full, or the save has taken too long, every file still waiting
@@ -428,10 +450,12 @@ export function createWorker({
       }
     };
     try {
-      log.log(`run ${run.id}: started (${run.base_url})`);
+      log.log(`run ${run.id}: started (${JSON.stringify(short(run.base_url, 2100))})`);
       // Check again: a user can insert a queued run straight into the table, past the API.
       const request = validateRunRequest(run, { catalog, rules: config.targetRules });
       if (!request.ok) return await finish(run, { status: "failed", error: `Refused: ${request.errors.map((e) => e.message).join(" ")}` });
+      // Never without the sandbox where it is needed, however the worker was started.
+      if (needsSandbox(config.targetRules) && !config.chromiumSandbox) return await finish(run, { status: "failed", error: `Refused: ${NEEDS_SANDBOX}.` });
       const target = new URL(request.value.base_url);
       const egress = await resolveEgress(target.hostname, Number(target.port || (target.protocol === "https:" ? 443 : 80)), config.targetRules, lookup);
       if (!egress.ok) return await finish(run, { status: "failed", error: `Refused: ${egress.reason}.` });
@@ -450,7 +474,8 @@ export function createWorker({
         chromiumSandbox: config.chromiumSandbox,
       };
       const runAs = config.runAs ? { ...config.runAs, home: dirs.home } : null;
-      const outcome = await execute(job, { timeoutMs: config.runTimeoutMs, signal: current.signal, runAs });
+      const outcome = await execute(job, { timeoutMs: config.runTimeoutMs, signal: current.signal, runAs, log });
+      if (outcome.blocked.some(isByteLimit)) log.log(`run ${run.id}: the network guard's byte limit closed its connections`);
       if (outcome.outcome === "aborted") {
         // The server is shutting down (a deploy, say): put the run back for the next instance.
         await db.requeue(run.id);
@@ -531,6 +556,22 @@ export function createWorker({
       };
     });
 
+  const NEEDS_SANDBOX = 'ALLOWED_TARGET_HOSTS with "*" or a wildcard rule needs Chromium\'s sandbox';
+
+  /** Why "*" or a wildcard may not be served here, or null. */
+  async function sandboxProblem() {
+    if (!config.chromiumSandbox) return `${NEEDS_SANDBOX}: set CHROMIUM_SANDBOX=true (docs/deploy.md, Security)`;
+    const reason = await probeSandbox(config.runAs, { signal: probing.signal });
+    if (stopping) return null; // shutting down: not a reason to exit as a failure
+    // The probe ran as the run's user: nothing of it may be left for the first run.
+    try {
+      if (config.runAs) await stopProcesses(config.runAs);
+    } catch (error) {
+      return `the sandbox probe's processes did not stop (${short(error.message, 300)})`;
+    }
+    return reason ? `${NEEDS_SANDBOX}, which did not start here: ${short(reason, 300)}` : null;
+  }
+
   async function run() {
     while (!stopping) {
       let worked = false;
@@ -558,12 +599,28 @@ export function createWorker({
           return Promise.resolve();
         }
       }
+      // Under "*", or a wildcard anyone may host a page under, pages the operator does not choose
+      // reach the browser, so a page that exploits Chromium must meet its sandbox, not only the
+      // network guard (R7.1, R8.3): the worker starts only if a sandboxed Chromium starts here,
+      // as the run's user.
+      if (!loop && needsSandbox(config.targetRules)) {
+        loop = (async () => {
+          const problem = await sandboxProblem();
+          if (problem) {
+            log.error(`not starting the worker: ${problem}`);
+            exit(1);
+            return;
+          }
+          await run();
+        })();
+      }
       loop ??= run();
       return loop;
     },
     /** Stop polling; a run in progress is stopped and put back in the queue. */
     async stop() {
       stopping = true;
+      probing.abort();
       current?.abort();
       wake();
       await loop;

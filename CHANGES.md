@@ -61,3 +61,25 @@ Append-only journal, oldest first. Earlier history: `git log` and `docs/handoff.
 2026-11-24 [decision] PManager: #14 merged as c2dc383; R5.1 to R5.3 listed in issue #15; a small PR for R5.1 before the service takes others' runs.
 
 2026-11-24 [code] R5.1: the run summary is kept under 48 KiB of JSON (names and blocked entries cut by code point, then trimmed); per-file log lines capped at 30.
+
+2026-11-24 [scope] Owner (via PManager): any signed-in person may test any public address; built as ALLOWED_TARGET_HOSTS="*", the allow-list stays the default.
+
+2026-11-24 [code] "*" rule: public hosts only, ports 80 and 443, checked at queue, run start and every connection; migration 0002 adds 10 runs per person per UTC day.
+
+2026-11-24 [decision] PManager: daily cap 10 per UTC day, one constant (daily_run_limit()); 80/443 for hosts not listed exactly in every mode; R6.2 folded into this PR.
+
+2026-11-24 [code] R6.2: the run process's messages are checked (shape, counts, strings), text made well formed and cut from bounded slices, names quoted in the log.
+
+2026-11-24 [code] #17 round 1: total of 40 runs a day (0002), 100 MB per run through the proxy, results bound to the job, quoted output, no ports on wildcard rules (R7.2 to R7.6).
+
+2026-11-24 [code] R7.1 (proposed option A): with "*", the worker starts only if CHROMIUM_SANDBOX=true and a sandboxed Chromium starts as the run user (sandbox-probe.js).
+
+2026-11-24 [decision] PManager (T1) on #17 round 1: R7.1 option A; total 40 a day; 100 MB per run; the dashboard says the page is opened by a browser on our server.
+
+2026-11-24 [code] #17 round 2: the run process has no IPC; job on stdin, messages as JSON lines on fd 3, at most 1 MB each; the dashboard sentence; "byte limit" in blocked.
+
+2026-11-24 [decision] PManager (T1): every wildcard rule needs the sandbox gate too (R8.3); round 3 is #17's last round.
+
+2026-11-24 [code] #17 round 3: the byte limit counts the browser's sockets (headers, uploads, tunnels), 500 host names a run, 256 KB messages, wildcards gated.
+
+2026-11-24 [doc] Owner: the dashboard says what the site does and how it relates to STEM Accessibility, linking https://github.com/stem-accessibility/frontend.

@@ -30,6 +30,21 @@
     </main>
     <footer class="site-footer">
       <div class="wrap">
+        <section id="about" aria-labelledby="about-heading">
+          <h2 id="about-heading">About this site</h2>
+          <p>
+            Screen Reader Journeys runs scripted journeys through a web page, by keyboard and with a
+            screen reader's view of it, in a real browser on our server. It reports what a
+            screen-reader user would hear and meet on the way: each stop, what is announced, and
+            the checks that pass or fail.
+          </p>
+          <p>
+            It was built to check the STEM Accessibility project, and most of its journeys were
+            written for that project's frontend, for example its braille, tactile and sonification
+            features. See
+            <a href="https://github.com/stem-accessibility/frontend">STEM Accessibility's frontend on GitHub</a>.
+          </p>
+        </section>
         <p>
           The transcripts are evidence for a person reviewing a change. They do not replace testing
           with real screen readers, or with the people who use them.
@@ -39,8 +54,9 @@
           the reports) are stored under your account in the HintWise database (Supabase, US East),
           and only you can read them. Finished runs are deleted once they are 30 days old, the next
           time the service runs, and you keep at most your 20 latest runs. Delete a run sooner from
-          its page, or everything with "Delete my account". Visits to this page are counted without
-          cookies.
+          its page, or everything with "Delete my account". For the limit of 10 runs a day, the
+          number of runs you started is kept for today and yesterday (UTC). Visits to this page are
+          counted without cookies.
         </p>
         <p><a href="licenses.txt">Third-party licences</a></p>
       </div>

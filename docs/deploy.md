@@ -46,8 +46,8 @@ releases, and each production step waits for the owner's yes.
 
 ## 1. The database
 
-1. **Migrations.** `supabase/migrations/0001_runs.sql` creates everything in the schema
-   `app_screen_reader_journeys`, idempotently:
+1. **Migrations,** applied in order, each idempotently. `0001_runs.sql` creates everything in
+   the schema `app_screen_reader_journeys`; `0002_daily_cap.sql` adds the daily limit:
    - **`runs`.** Signed-in people read their own, queue new ones (status `queued` only, at most
      three waiting or running) and delete their own.
    - **`run_results` and `run_reports`.** People read their own.
@@ -57,6 +57,11 @@ releases, and each production step waits for the owner's yes.
      `worker_requeue_run`, `worker_save_report`, `worker_add_results` and `worker_finish_run`.
      Each checks the token's SHA-256 against `worker_config` and refuses every token until that
      row exists.
+   - **`run_counts` and `run_totals`** (0002). How many runs each person, and everyone together,
+     started per UTC day, for the limits of 10 and 40 a day (`daily_run_limit()` and
+     `daily_total_limit()`, one line each to change). Only a trigger writes them; nobody reads or
+     changes them through the API, so deleting one's runs does not reset them, and deleting an
+     account does not lower the total. They keep today and yesterday, for everyone.
 2. **Expose the schema** to the Data API (`expose-schema app_screen_reader_journeys`). Until then,
    PostgREST answers 406 for every request.
 3. **`check-schema app_screen_reader_journeys`** must pass before the first deploy.
@@ -110,12 +115,13 @@ shared with other apps). It needs a service of its own, built from this reposito
 | `SUPABASE_ANON_KEY` | the public anon key, from claude-built-apps `platform/supabase.json` |
 | `WORKER_TOKEN` | the token from step 2 (secret) |
 | `ALLOWED_ORIGINS` | `https://screen-reader-journeys.hintwise.org` |
-| `ALLOWED_TARGET_HOSTS` | the sites the server may test, as exact hosts (see below). Empty means none |
+| `ALLOWED_TARGET_HOSTS` | the sites the server may test, as exact hosts, or `*` for any public site (see below). Empty means none |
 
 - **Defaults.** `RUN_TIMEOUT_SECONDS` (900) and `POLL_INTERVAL_SECONDS` (5) are set in
   `render.yaml`, and `SUPABASE_TIMEOUT_SECONDS` defaults to 30.
 - **Set for you.** Render sets `PORT`, and the Docker image sets `RUN_AS_UID` and `RUN_AS_GID`.
-- **Leave unset:** `CHROMIUM_SANDBOX` (see [Security](#security)).
+- **`CHROMIUM_SANDBOX`:** leave it unset with exact hosts only; set it to `true` with `*` or a
+  wildcard rule, which need it (see [Security](#security)).
 - **Plan: free** (the owner, 23 November 2026). It costs nothing, and has 0.1 CPU and 512 MB.
   Keep one instance, since the worker runs one run at a time. A paid plan needs the owner's yes.
   - **It sleeps** after 15 minutes without requests. A queued run waits until the next request
@@ -243,19 +249,46 @@ cannot complete a real sign-in. Use the API with a token from the local stack in
 | `stem-accessibility.example.org` | `https://` and `http://` on that host, default port | `www.stem-accessibility.example.org`, other ports |
 | `*.vercel.app` | `https://` on any subdomain, e.g. `https://frontend-git-x.vercel.app` | `vercel.app` itself, `evilvercel.app`, `vercel.app.evil.com`, `http://` |
 | `127.0.0.1:4173` | that address and port, `http://` or `https://` | other ports, `localhost`, other loopback addresses |
+| `*` | any public site: `https://` or `http://`, ports 80 and 443 only | the addresses below, and other ports |
+
+**`*`, any public site.** Any signed-in person may then test any public address. It can stand
+alone, or with exact rules (`*, 127.0.0.1:4173`), which stay trusted as listed. Under `*` the
+server refuses, when the run is queued, again when it starts, and at every connection the
+browser makes (redirects and subresources included):
+
+- loopback, private networks, link-local (and so cloud metadata, `169.254.169.254` and
+  `fd00:ec2::254`), carrier-grade NAT, multicast, unspecified (`0.0.0.0`, `::`), documentation
+  and other reserved ranges, IPv4-mapped and other IPv6 forms that embed an IPv4 address;
+- a host name that resolves to any such address, even alongside public ones. The proxy resolves
+  each host once and connects to the address it checked, so a changed DNS answer cannot redirect
+  the connection;
+- `localhost` names, and single-label hosts such as `https://intranet/`, which would use the DNS
+  search path;
+- ports other than 80 and 443.
+
+`*` never makes a host "listed exactly": everything it admits is checked like that. It, and any
+wildcard rule, also needs Chromium's sandbox (`CHROMIUM_SANDBOX=true`, checked when the worker
+starts; see Security). A person may also start at most 10 runs a day (UTC, `0002_daily_cap.sql`),
+everyone together 40, and a person may have at most 3 waiting or running. A run may move at most
+100 MB through the proxy, and look up at most 500 host names.
 
 The server also refuses:
 
 - addresses with a user name or password;
-- IP addresses and `localhost`, unless listed exactly;
+- IP addresses and `localhost`, unless listed exactly (under `*`, public IP addresses are
+  allowed);
+- for a connection to a host that is not listed exactly, any port but 80 and 443, in every mode,
+  so a tested page cannot use the server to reach other services on public hosts (so a wildcard
+  rule may not name a port either);
 - journeys that are not files in its own `targets/`. People choose journeys by path, so the
   server never runs code a person sends.
 
 It checks a run again before running it, because a signed-in person can also insert a queued run
 straight into the table.
 
-`*.vercel.app` admits any Vercel deployment, including other people's. Prefer exact hosts, or a
-domain only you control, where you can.
+`*.vercel.app` admits any Vercel deployment, including other people's, so any wildcard rule, like
+`*`, needs Chromium's sandbox (see Security). Prefer exact hosts, or a domain only you control,
+where you can.
 
 ## Operations
 
@@ -269,7 +302,13 @@ domain only you control, where you can.
   - When Render restarts the service (a deploy, say), the run in progress goes back in the queue.
   - A run left `running` by a service that crashed is marked failed ten minutes after its timeout.
 - **Limits.**
-  - Three runs waiting or running per person (`limit_active_runs`).
+  - Three runs waiting or running per person (`limit_active_runs`); ten started per UTC day per
+    person, and forty in all (`limit_daily_runs`, 0002). Each answers 429 with the reason.
+  - Per run, through the network guard: at most 100 MB, both directions together, counted on
+    the browser's own connections to it (request lines, headers, bodies, uploads and tunnels
+    alike; checked every 50 ms, so a run may pass it by what moves in that time). Then every
+    connection is closed and new ones are refused; the run's blocked requests say so first, and
+    the server logs one line. A run may also look up at most 500 host names, each once.
   - Per run: one result for each of the run's journeys and modes (a unique constraint), and at
     most 200 report files and 20 MiB of reports, of at most 2 MiB each.
   - A file is left out if it is a link or another non-file, is over 2 MiB, has a name the
@@ -357,21 +396,40 @@ domain only you control, where you can.
 - **Network guard.** Pages under test are untrusted, and their scripts run in the server's
   Chromium.
   - Every connection the browser makes goes through a proxy local to the run. The proxy refuses
-    loopback, private-network, link-local (cloud metadata) and other reserved addresses, unless
-    the host is listed exactly in `ALLOWED_TARGET_HOSTS`.
+    loopback, private-network, link-local (cloud metadata) and other reserved addresses, and any
+    port but 80 and 443, unless the host is listed exactly in `ALLOWED_TARGET_HOSTS` (`*` lists
+    no host exactly).
   - It resolves each host itself and connects to the address it checked, so a DNS answer that
     changes cannot redirect it.
   - Requests that a journey's own `setup` answers (the STEM-Accessibility mock) never leave the
     browser, so mocks still work.
   - QUIC is turned off, and WebRTC may not use UDP, since neither would go through the proxy.
-- **Chromium's sandbox** is off by default, because it cannot start inside a standard Docker
-  container (Render's included).
-  - A Chromium exploit in a tested page would therefore run as `runner` inside the container. It
-    could not read the server's environment, but it could use the container's network outside the
-    proxy.
-  - So keep the list of allowed sites short and trusted (exact hosts), and keep Playwright and
-    the image up to date.
-  - Set `CHROMIUM_SANDBOX=true` only on a host where Chromium's sandbox works.
+  - What the run process sends back is checked: results only for the run's own journeys and
+    modes, of the right shape, and only the fields the worker uses are kept; nothing is read
+    after it is done or has failed, or after something malformed (which ends the run as an
+    error). Results already on their way when its time is up are still taken until it has
+    ended. It has no IPC channel: the job goes in on stdin, and its messages come back on a
+    pipe, one JSON line each, at most 256 KB a line, so it cannot make the server hold more than
+    that at once, plus at most one small result for each journey and mode. Its own output
+    reaches the log quoted, one line at a time, at most 2000 characters a line and 1000 lines a
+    run, stdout and stderr together.
+- **Chromium's sandbox** (`CHROMIUM_SANDBOX`) is off by default: it needs user namespaces,
+  which many container hosts do not allow.
+  - **Without it**, a Chromium exploit in a tested page runs as `runner` inside the container. It
+    cannot read the server's environment, but the network guard is a process like any other, not
+    a wall: the exploit can use the container's network without it, Render's private network
+    included. With exact hosts only, that risk is limited to the sites listed, so keep the list
+    short and trusted.
+  - **With `*` or a wildcard rule, the sandbox is required.** Anyone signed in may then send the
+    browser to any page (`*`), or to any page under a shared domain (`*.vercel.app`, where anyone
+    may host one). So the worker then starts only if `CHROMIUM_SANDBOX=true` and a sandboxed
+    Chromium starts here, as `runner` (`server/sandbox-probe.js`, tried once at start-up).
+    Otherwise the log says `not starting the worker: ALLOWED_TARGET_HOSTS with "*" or a wildcard
+    rule needs Chromium's sandbox ...` and the server exits. A run is also refused, and the run
+    process refuses its job, without the sandbox. Whether Render's host allows it is known only by
+    trying.
+  - **In every mode**, keep Playwright and the image up to date: within a week of a Chromium
+    security release.
 - **Errors** shown to people are short. Database details go only to Render's log.
 - **Reports** are fetched one at a time, when their download button is pressed, and always saved
   as `application/octet-stream`. A report is never opened as a page at the dashboard's address,

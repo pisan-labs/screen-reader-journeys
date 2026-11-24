@@ -334,9 +334,13 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
       journeys: h('p', { id: 'journeys-error', class: 'field-error' }),
       modes: h('p', { id: 'modes-error', class: 'field-error' }),
     };
-    const allowed = list.allowed_hosts.length
-      ? `This server may test ${list.allowed_hosts.join(', ')}.`
-      : 'This server has no allowed sites yet, so runs will be refused.';
+    // "*" is any public site (server/hosts.js); other rules are named as listed.
+    const listed = list.allowed_hosts.filter((host) => host !== '*');
+    const allowed = list.allowed_hosts.includes('*')
+      ? `This server may test any public address, with http or https on ports 80 and 443${listed.length ? `, and ${listed.join(', ')}` : ''}.`
+      : list.allowed_hosts.length
+        ? `This server may test ${list.allowed_hosts.join(', ')}.`
+        : 'This server has no allowed sites yet, so runs will be refused.';
     const journeyBoxes = list.journeys.map((journey, i) =>
       h(
         'div',
@@ -363,7 +367,7 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
         'div',
         { class: 'field' },
         h('label', { for: 'base-url' }, 'Site address'),
-        h('p', { id: 'base-url-hint', class: 'hint' }, `Where the journeys start, for example a pull request's preview. ${allowed}`),
+        h('p', { id: 'base-url-hint', class: 'hint' }, `Where the journeys start, for example a pull request's preview. ${allowed} The page is opened by a browser on our server, over the public internet.`),
         baseUrl,
         errors.base_url,
       ),
