@@ -32,6 +32,14 @@ describe('HintWise footer, favicon and analytics', () => {
     expect(html.indexOf('hw-events.js')).toBeLessThan(html.indexOf('</head>'));
   });
 
+  it('says what the site does, and links STEM Accessibility\'s frontend on GitHub (the owner, 24 November)', () => {
+    const about = /<section id="about" aria-labelledby="about-heading">([\s\S]*?)<\/section>/.exec(html)?.[1].replace(/\s+/g, ' ') ?? '';
+    expect(about).toMatch(/<h2 id="about-heading">About this site<\/h2>/);
+    expect(about).toMatch(/runs scripted journeys through a web page, by keyboard and with a screen reader's view of it, in a real browser on our server/);
+    expect(about).toMatch(/built to check the STEM Accessibility project/);
+    expect(about).toContain('<a href="https://github.com/stem-accessibility/frontend">STEM Accessibility\'s frontend on GitHub</a>');
+  });
+
   it('says what it stores and that visits are counted without cookies', () => {
     const privacy = /<p id="privacy">([\s\S]*?)<\/p>/.exec(html)?.[1].replace(/\s+/g, ' ') ?? '';
     expect(privacy).toMatch(/stored under your account/);
