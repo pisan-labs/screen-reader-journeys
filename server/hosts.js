@@ -61,6 +61,8 @@ function parseRule(text) {
   if (kind === "domain" && !isDomainName(host)) fail("is not a valid host name");
   if (wildcard && kind !== "domain") fail("uses a wildcard with an IP address or localhost; list those exactly");
   if (wildcard && !host.includes(".")) fail("is too broad; a wildcard needs at least two labels, e.g. *.vercel.app");
+  // Its hosts are not listed exactly, so their connections may use only ports 80 and 443.
+  if (wildcard && port !== null) fail("may not name a port; a wildcard admits ports 80 and 443 only");
   return { text, wildcard, host, port, kind };
 }
 
@@ -113,7 +115,10 @@ export function checkTargetUrl(input, rules) {
   if (url.username || url.password) return refuse("The address must not contain a user name or password.");
   if (url.hostname.endsWith(".")) return refuse("The host name must not end with a dot.");
   if (!rules.length) return refuse("This server has no allowed sites yet (ALLOWED_TARGET_HOSTS is empty), so it cannot test any address.");
-  const rule = matchRule(url, rules);
+  // Any rule that admits the address will do, whatever their order: for http, one that allows
+  // http (an exact rule, or "*") wins over a wildcard, which needs https.
+  const matches = rules.filter((r) => matchRule(url, [r]));
+  const rule = (url.protocol === "http:" && matches.find((r) => !r.wildcard)) || matches[0] || null;
   if (!rule && rules.some((r) => r.any)) return refuse(whyNotPublic(url));
   if (!rule) return refuse(`${url.host} is not one of the sites this server may test (${rules.map((r) => r.text).join(", ")}).`);
   if (url.protocol === "http:" && rule.wildcard) return refuse(`http is only allowed for hosts listed exactly; use https://${url.host}.`);

@@ -30,7 +30,7 @@ describe("ALLOWED_TARGET_HOSTS parsing", () => {
     assert.equal(checkTargetUrl("https://good.vercel.app/", []).ok, false);
   });
 
-  for (const bad of ["*:443", "**", "*.*", "*.com", "https://example.org", "example.org/path", "user@example.org", "*.127.0.0.1", "*.0.0.1", "*.localhost", "ex*ample.org", "a.*.example.org", "example.org:0", "example.org:99999", "::1", "exa mple.org", "-bad-.example.org"]) {
+  for (const bad of ["*.staging.example.org:8443", "*.vercel.app:443", "*:443", "**", "*.*", "*.com", "https://example.org", "example.org/path", "user@example.org", "*.127.0.0.1", "*.0.0.1", "*.localhost", "ex*ample.org", "a.*.example.org", "example.org:0", "example.org:99999", "::1", "exa mple.org", "-bad-.example.org"]) {
     it(`refuses the rule "${bad}"`, () => assert.throws(() => parseAllowedHosts(bad), /ALLOWED_TARGET_HOSTS/));
   }
 });
@@ -340,6 +340,13 @@ describe('ALLOWED_TARGET_HOSTS="*": any public site', () => {
     it(`accepts ${url}`, () => assert.deepEqual(check(url), { ok: true, url: normalized }));
   }
 
+  it("admits http on a subdomain whatever the rules' order, when \"*\" is among them (R7.6)", () => {
+    for (const text of ["*.vercel.app, *", "*, *.vercel.app"]) {
+      assert.deepEqual(check("http://foo.vercel.app/", parseAllowedHosts(text)), { ok: true, url: "http://foo.vercel.app/" }, text);
+    }
+    assert.equal(check("http://foo.vercel.app/", parseAllowedHosts("*.vercel.app")).ok, false, "a wildcard alone still needs https");
+  });
+
   it("still trusts an exact rule listed with it, on its own port", () => {
     assert.equal(check("http://127.0.0.1:4173/", mixed).ok, true);
     assert.equal(check("http://127.0.0.1:4174/", mixed).ok, false);
@@ -483,5 +490,93 @@ describe('the egress proxy under "*"', () => {
     assert.equal(await tunnel("public.example:22"), 403);
     assert.equal(await tunnel("93.184.216.34:8443"), 403);
     assert.ok(proxy.blocked.some((b) => b.startsWith("public.example:22 ") && /port 22/.test(b)), proxy.blocked.join("\n"));
+  });
+});
+
+describe("the egress proxy connects to the checked address, and limits a run's bytes (R7.2, R7.3)", () => {
+  let site;
+  let echo;
+  before(async () => {
+    site = await new Promise((done) => {
+      const server = createServer((req, res) => res.end(req.url === "/big" ? "x".repeat(5000) : "small"));
+      server.listen(0, "127.0.0.1", () => done(server));
+    });
+    echo = await new Promise((done) => {
+      const server = net.createServer((socket) => socket.pipe(socket));
+      server.listen(0, "127.0.0.1", () => done(server));
+    });
+  });
+  after(() => {
+    site.close();
+    echo.close();
+  });
+  const call = (proxy, url) =>
+    new Promise((resolve) => {
+      const req = request({ host: "127.0.0.1", port: Number(new URL(proxy.server).port), path: url, headers: { host: new URL(url).host } }, (res) => {
+        let body = "";
+        res.on("data", (c) => (body += c));
+        res.on("end", () => resolve({ status: res.statusCode, body }));
+        res.on("error", () => resolve({ status: res.statusCode, body, cut: true }));
+        res.on("aborted", () => resolve({ status: res.statusCode, body, cut: true }));
+      });
+      req.on("error", () => resolve({ status: 0, body: "", cut: true }));
+      req.end();
+    });
+  const tunnel = (proxy, authority, send = "") =>
+    new Promise((resolve) => {
+      const req = request({ host: "127.0.0.1", port: Number(new URL(proxy.server).port), method: "CONNECT", path: authority });
+      req.on("connect", (res, socket) => {
+        let back = 0;
+        socket.on("data", (c) => (back += c.length));
+        socket.on("close", () => resolve({ status: res.statusCode, back }));
+        if (send) socket.write(send);
+        else socket.end();
+      });
+      req.on("error", () => resolve({ status: 0, back: 0 }));
+      req.end();
+    });
+
+  it("hands the checked address, not the host name, to the connection it opens", async () => {
+    const seen = [];
+    const proxy = await startEgressProxy({
+      rules: parseAllowedHosts("*"),
+      // The name resolves to a public address; a second answer (rebinding) is never asked for.
+      lookup: async () => ["93.184.216.34"],
+      connectTo: /** @type {any} */ ((port, host, done) => (seen.push(["connect", host, port]), net.connect(echo.address().port, "127.0.0.1", done))),
+      requestTo: /** @type {any} */ ((options, done) => (seen.push(["request", options.host, options.port]), request({ ...options, host: "127.0.0.1", port: site.address().port }, done))),
+    });
+    try {
+      assert.equal((await tunnel(proxy, "rebind.example:443")).status, 200);
+      assert.deepEqual(await call(proxy, "http://rebind.example/"), { status: 200, body: "small" });
+      assert.deepEqual(seen, [["connect", "93.184.216.34", 443], ["request", "93.184.216.34", 80]]);
+    } finally {
+      await proxy.close();
+    }
+  });
+
+  it("closes everything, and refuses new connections, once a run has moved its limit", async () => {
+    const proxy = await startEgressProxy({ rules: parseAllowedHosts(`127.0.0.1:${site.address().port}, 127.0.0.1:${echo.address().port}`), maxBytes: 3000 });
+    try {
+      assert.deepEqual(await call(proxy, `http://127.0.0.1:${site.address().port}/`), { status: 200, body: "small" });
+      const big = await call(proxy, `http://127.0.0.1:${site.address().port}/big`);
+      assert.ok(big.body.length < 5000, `cut short at the limit (${big.body.length} bytes arrived)`);
+      assert.equal((await call(proxy, `http://127.0.0.1:${site.address().port}/`)).status, 403, "nothing more once full");
+      assert.equal((await tunnel(proxy, `127.0.0.1:${echo.address().port}`)).status, 403);
+      assert.ok(proxy.blocked.some((b) => /reached its limit/.test(b)), proxy.blocked.join("\n"));
+    } finally {
+      await proxy.close();
+    }
+  });
+
+  it("counts a tunnel's bytes, both ways", async () => {
+    const proxy = await startEgressProxy({ rules: parseAllowedHosts(`127.0.0.1:${echo.address().port}`), maxBytes: 3000 });
+    try {
+      const { status, back } = await tunnel(proxy, `127.0.0.1:${echo.address().port}`, "y".repeat(2000));
+      assert.equal(status, 200);
+      assert.ok(back < 2000, `the echo was cut at the limit (${back} bytes came back)`);
+      assert.ok(proxy.blocked.some((b) => /reached its limit/.test(b)));
+    } finally {
+      await proxy.close();
+    }
   });
 });
