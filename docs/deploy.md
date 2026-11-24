@@ -120,7 +120,8 @@ shared with other apps). It needs a service of its own, built from this reposito
 - **Defaults.** `RUN_TIMEOUT_SECONDS` (900) and `POLL_INTERVAL_SECONDS` (5) are set in
   `render.yaml`, and `SUPABASE_TIMEOUT_SECONDS` defaults to 30.
 - **Set for you.** Render sets `PORT`, and the Docker image sets `RUN_AS_UID` and `RUN_AS_GID`.
-- **Leave unset:** `CHROMIUM_SANDBOX` (see [Security](#security)).
+- **`CHROMIUM_SANDBOX`:** leave it unset with an allow-list; set it to `true` with `*`, which
+  needs it (see [Security](#security)).
 - **Plan: free** (the owner, 23 November 2026). It costs nothing, and has 0.1 CPU and 512 MB.
   Keep one instance, since the worker runs one run at a time. A paid plan needs the owner's yes.
   - **It sleeps** after 15 minutes without requests. A queued run waits until the next request
@@ -265,9 +266,11 @@ browser makes (redirects and subresources included):
   search path;
 - ports other than 80 and 443.
 
-`*` never makes a host "listed exactly": everything it admits is checked like that. A person may
-also start at most 10 runs a day (UTC, `0002_daily_cap.sql`), everyone together 40, and a person
-may have at most 3 waiting or running. A run may move at most 100 MB through the proxy.
+`*` never makes a host "listed exactly": everything it admits is checked like that. It also needs
+Chromium's sandbox (`CHROMIUM_SANDBOX=true`, checked when the worker starts; see Security).
+A person may also start at most 10 runs a day (UTC, `0002_daily_cap.sql`), everyone together 40,
+and a person may have at most 3 waiting or running. A run may move at most 100 MB through the
+proxy.
 
 The server also refuses:
 
@@ -401,14 +404,20 @@ domain only you control, where you can.
     modes, of the right shape; nothing after it is done, has failed or has sent something
     malformed (which ends the run as an error). Its own output reaches the log quoted, one line
     at a time, at most 2000 characters a line and 1000 lines a run.
-- **Chromium's sandbox** is off by default, because it cannot start inside a standard Docker
-  container (Render's included).
-  - A Chromium exploit in a tested page would therefore run as `runner` inside the container. It
-    could not read the server's environment, but it could use the container's network outside the
-    proxy.
-  - So keep the list of allowed sites short and trusted (exact hosts), and keep Playwright and
-    the image up to date.
-  - Set `CHROMIUM_SANDBOX=true` only on a host where Chromium's sandbox works.
+- **Chromium's sandbox** (`CHROMIUM_SANDBOX`) is off by default: it needs user namespaces,
+  which many container hosts do not allow.
+  - **Without it**, a Chromium exploit in a tested page runs as `runner` inside the container. It
+    cannot read the server's environment, but the network guard is a process like any other, not
+    a wall: the exploit can use the container's network without it, Render's private network
+    included. With an allow-list, that risk is limited to the sites listed, so keep the list short
+    and trusted (exact hosts).
+  - **With `*`, the sandbox is required.** Any signed-in person may then send the browser to any
+    page, so with `*` the worker starts only if `CHROMIUM_SANDBOX=true` and a sandboxed Chromium
+    starts here, as `runner` (`server/sandbox-probe.js`, tried once at start-up). Otherwise the
+    log says `not starting the worker: ALLOWED_TARGET_HOSTS="*" needs Chromium's sandbox ...`
+    and the server exits. Whether Render's host allows it is known only by trying.
+  - **In every mode**, keep Playwright and the image up to date: within a week of a Chromium
+    security release.
 - **Errors** shown to people are short. Database details go only to Render's log.
 - **Reports** are fetched one at a time, when their download button is pressed, and always saved
   as `application/octet-stream`. A report is never opened as a page at the dashboard's address,

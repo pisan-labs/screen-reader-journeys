@@ -71,3 +71,5 @@ Append-only journal, oldest first. Earlier history: `git log` and `docs/handoff.
 2026-11-24 [code] R6.2: the run process's messages are checked (shape, counts, strings), text made well formed and cut from bounded slices, names quoted in the log.
 
 2026-11-24 [code] #17 round 1: total of 40 runs a day (0002), 100 MB per run through the proxy, results bound to the job, quoted output, no ports on wildcard rules (R7.2 to R7.6).
+
+2026-11-24 [code] R7.1 (proposed option A): with "*", the worker starts only if CHROMIUM_SANDBOX=true and a sandboxed Chromium starts as the run user (sandbox-probe.js).

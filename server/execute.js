@@ -1,9 +1,11 @@
 // Start a run's child process and wait for it, with a timeout and a way to abort it.
 
 import { fork } from "node:child_process";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const CHILD = fileURLToPath(new URL("./run-child.js", import.meta.url));
+const PROBE = fileURLToPath(new URL("./sandbox-probe.js", import.meta.url));
 
 // Only these variables reach the process that drives the browser: no credentials, and not
 // Playwright's switch for letting loopback bypass the proxy. SRJ_TEST_* are the self-tests' own.
@@ -65,6 +67,40 @@ export function relayOutput(stream, write, { maxLine = 2000, maxLines = 1000 } =
   });
   stream.on("end", () => {
     if (line || cutShort) emit();
+  });
+}
+
+/**
+ * Start Chromium once with its sandbox, as `runAs` (sandbox-probe.js). Resolves to null if it
+ * worked, or to the reason it did not; never rejects. Ended after `timeoutMs`.
+ *
+ * @param {{ uid: number, gid: number } | null} runAs
+ * @param {{ timeoutMs?: number, program?: string }} [options]
+ * @returns {Promise<string | null>}
+ */
+export function probeSandbox(runAs, { timeoutMs = 60000, program = PROBE } = {}) {
+  return new Promise((resolve) => {
+    const child = fork(program, [], {
+      execArgv: [],
+      env: childEnv(process.env, { HOME: tmpdir() }),
+      stdio: ["ignore", "pipe", "ignore", "ipc"],
+      ...(runAs ? { uid: runAs.uid, gid: runAs.gid } : {}),
+    });
+    let said = "";
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (/** @type {string} */ chunk) => {
+      if (said.length < 1000) said += chunk;
+    });
+    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      resolve(`the probe could not start (${error.message})`);
+    });
+    child.on("exit", (code, signal) => {
+      clearTimeout(timer);
+      if (code === 0) return resolve(null);
+      resolve(said.trim().split("\n")[0] || `the probe ended (${signal ?? `exit code ${code}`})`);
+    });
   });
 }
 

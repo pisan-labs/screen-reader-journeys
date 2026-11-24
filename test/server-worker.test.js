@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { loadCatalog, REPO_ROOT } from "../server/catalog.js";
-import { childEnv, executeRun } from "../server/execute.js";
+import { childEnv, executeRun, probeSandbox } from "../server/execute.js";
 import { timeoutFetch } from "../server/timeout-fetch.js";
 import { parseAllowedHosts } from "../server/hosts.js";
 import { MAX_REPORT_BYTES, MAX_REPORT_FILES, createWorker, summarizeRun } from "../server/worker.js";
@@ -786,6 +786,63 @@ describe("worker, with a fake run process", () => {
       }
     });
 
+    describe('with ALLOWED_TARGET_HOSTS="*", the worker starts only with a working sandbox (R7.1)', () => {
+      const start = async ({ sandbox, probe, stop = async () => {} }) => {
+        const run = queued({ base_url: "https://example.org/", journeys: [BASIC] });
+        const fake = fakeSupabase({ runs: [run] });
+        const exits = [];
+        const errors = [];
+        const probed = [];
+        const stopped = [];
+        const worker = createWorker({
+          db: dbOf(fake),
+          catalog,
+          config: { ...own(), ...configFor("*", { runAs: own().runAs, chromiumSandbox: sandbox }) },
+          execute: async () => ({ outcome: "done", error: null, results: [], blocked: [] }),
+          lookup,
+          log: { log() {}, error: (m) => errors.push(m) },
+          stopProcesses: async (runAs) => (stopped.push(runAs), stop()),
+          readSuidDumpable: () => "2",
+          probeSandbox: async (runAs) => (probed.push(runAs), probe?.()),
+          exit: (c) => exits.push(c),
+        });
+        const loop = worker.start();
+        await Promise.race([loop, new Promise((r) => setTimeout(r, 300))]);
+        await worker.stop();
+        return { exits, errors, probed, stopped, status: fake.run(run.id).status };
+      };
+
+      it("refuses without CHROMIUM_SANDBOX=true, and does not probe", async () => {
+        const { exits, errors, probed, status } = await start({ sandbox: false });
+        assert.deepEqual(exits, [1]);
+        assert.ok(errors.some((m) => /not starting the worker: ALLOWED_TARGET_HOSTS="\*" needs Chromium's sandbox: set CHROMIUM_SANDBOX=true/.test(m)), errors.join("\n"));
+        assert.deepEqual(probed, []);
+        assert.equal(status, "queued", "no run was claimed");
+      });
+
+      it("refuses when a sandboxed Chromium does not start here, and stops what the probe left", async () => {
+        const { exits, errors, probed, stopped, status } = await start({ sandbox: true, probe: () => "No usable sandbox!" });
+        assert.deepEqual(exits, [1]);
+        assert.ok(errors.some((m) => m.includes("which did not start here: No usable sandbox!")), errors.join("\n"));
+        assert.equal(probed.length, 1);
+        assert.equal(stopped.length, 1, "the probe's processes were stopped");
+        assert.equal(status, "queued");
+      });
+
+      it("refuses when what the probe left cannot be stopped", async () => {
+        const { exits, errors } = await start({ sandbox: true, probe: () => null, stop: () => Promise.reject(new Error("still running: 42")) });
+        assert.deepEqual(exits, [1]);
+        assert.ok(errors.some((m) => m.includes("the sandbox probe's processes did not stop (still running: 42)")), errors.join("\n"));
+      });
+
+      it("starts, and takes runs, when the sandbox works", async () => {
+        const { exits, probed, status } = await start({ sandbox: true, probe: () => null });
+        assert.deepEqual(exits, []);
+        assert.equal(probed.length, 1);
+        assert.equal(status, "done", "the run was taken and finished");
+      });
+    });
+
     it("bounds the whole read, not only each request (R2.G-5)", async () => {
       const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
       const fake = fakeSupabase({ runs: [run] });
@@ -1087,6 +1144,54 @@ describe("the run process's output is checked before it is used (R6.2)", () => {
     assert.deepEqual(summary.skipped_files, ["\uFFFD.md", "a\uFFFDb.md"]);
     const long = summarizeRun({ results: [], blocked: ["z".repeat(10_000_000)], outcome: "done" }, [], []);
     assert.equal(Array.from(long.blocked_requests[0]).length, 300, "a huge entry is cut from a bounded slice");
+  });
+});
+
+describe("probeSandbox (R7.1)", () => {
+  const program = async (source) => {
+    const folder = await mkdtemp(join(tmpdir(), "srj-sbx-"));
+    const file = join(folder, "probe.mjs");
+    await writeFile(file, source);
+    return { file, done: () => rm(folder, { recursive: true, force: true }) };
+  };
+
+  it("is null when the probe opened a sandboxed page, and the probe's reason when not", async () => {
+    const ok = await program("process.exit(0);\n");
+    const no = await program('process.stdout.write("No usable sandbox! Update your kernel\\nmore\\n"); process.exit(1);\n');
+    try {
+      assert.equal(await probeSandbox(null, { program: ok.file }), null);
+      assert.equal(await probeSandbox(null, { program: no.file }), "No usable sandbox! Update your kernel");
+    } finally {
+      await ok.done();
+      await no.done();
+    }
+  });
+
+  it("probe() opens a page in a Chromium started with its sandbox, and closes it", async () => {
+    const { probe } = await import("../server/sandbox-probe.js");
+    const calls = [];
+    const browser = { newPage: async () => ({ setContent: async (html) => calls.push(["page", html]) }), close: async () => calls.push(["close"]) };
+    await probe({ launch: async (options) => (calls.push(["launch", options]), browser) });
+    assert.deepEqual(calls, [["launch", { chromiumSandbox: true, timeout: 20000 }], ["page", "<p>sandboxed</p>"], ["close"]]);
+    await assert.rejects(probe({ launch: async () => Promise.reject(new Error("No usable sandbox!")) }), /No usable sandbox/);
+  });
+
+  it("ends a probe that hangs, and says so", async () => {
+    const hang = await program("setInterval(() => {}, 1000);\n");
+    try {
+      assert.equal(await probeSandbox(null, { program: hang.file, timeoutMs: 200 }), "the probe ended (SIGKILL)");
+    } finally {
+      await hang.done();
+    }
+  });
+
+  const root = process.getuid?.() === 0;
+  it("with the real Chromium, as the run's user, answers and leaves nothing running", { skip: !root && "needs root, as in the Docker image" }, async () => {
+    const answer = await probeSandbox({ uid: 10001, gid: 10001 });
+    assert.ok(answer === null || (typeof answer === "string" && answer.length > 0), String(answer));
+    const { stopUserProcesses, processesOf } = await import("../server/reports.js");
+    await stopUserProcesses(10001);
+    assert.deepEqual(await processesOf(10001), []);
   });
 });
 

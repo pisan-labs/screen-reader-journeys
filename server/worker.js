@@ -6,7 +6,7 @@ import { chmod, chown, lstat, mkdir, mkdtemp, rm, rmdir } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 import { findJourney } from "./catalog.js";
-import { executeRun } from "./execute.js";
+import { executeRun, probeSandbox as realProbeSandbox } from "./execute.js";
 import { resolveEgress } from "./hosts.js";
 import { clearFolders } from "./report-child.js";
 import { checkReportsFolder, listReportFiles, readReportFile, recordReportsFolder, startReportChild, stopUserProcesses, suidDumpableProblem } from "./reports.js";
@@ -150,6 +150,7 @@ export function summarizeRun({ results, blocked, outcome }, files, skipped = [])
  *   saveLimitMs?: number,
  *   now?: () => number,
  *   readSuidDumpable?: () => string,
+ *   probeSandbox?: (runAs: { uid: number, gid: number } | null) => Promise<string | null>,
  * }} options
  */
 export function createWorker({
@@ -166,6 +167,7 @@ export function createWorker({
   saveLimitMs = SAVE_LIMIT_MS,
   now = () => performance.now(),
   readSuidDumpable = undefined,
+  probeSandbox = realProbeSandbox,
 }) {
   let stopping = false;
   let loop = null;
@@ -546,6 +548,20 @@ export function createWorker({
       };
     });
 
+  /** Why "*" may not be served here, or null. */
+  async function sandboxProblem() {
+    const needs = 'ALLOWED_TARGET_HOSTS="*" needs Chromium\'s sandbox';
+    if (!config.chromiumSandbox) return `${needs}: set CHROMIUM_SANDBOX=true (docs/deploy.md, Security)`;
+    const reason = await probeSandbox(config.runAs);
+    // The probe ran as the run's user: nothing of it may be left for the first run.
+    try {
+      if (config.runAs) await stopProcesses(config.runAs);
+    } catch (error) {
+      return `the sandbox probe's processes did not stop (${short(error.message, 300)})`;
+    }
+    return reason ? `${needs}, which did not start here: ${short(reason, 300)}` : null;
+  }
+
   async function run() {
     while (!stopping) {
       let worked = false;
@@ -572,6 +588,20 @@ export function createWorker({
           exit(1);
           return Promise.resolve();
         }
+      }
+      // Under "*" any signed-in person may send the browser to any page, so a page that exploits
+      // Chromium must meet its sandbox, not only the network guard (R7.1): the worker starts only
+      // if a sandboxed Chromium starts here, as the run's user.
+      if (!loop && config.targetRules.some((rule) => rule.any)) {
+        loop = (async () => {
+          const problem = await sandboxProblem();
+          if (problem) {
+            log.error(`not starting the worker: ${problem}`);
+            exit(1);
+            return;
+          }
+          await run();
+        })();
       }
       loop ??= run();
       return loop;
