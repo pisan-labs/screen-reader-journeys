@@ -34,6 +34,40 @@ export function isResult(r) {
 /** The proxy's refusals: strings, "host:port (reason)", each cut here to a bounded length. */
 const blockedOf = (list) => (Array.isArray(list) && list.length <= 1000 && list.every((s) => typeof s === "string") ? list.map((s) => s.slice(0, 2000)) : null);
 
+/**
+ * Relay a run process's output to the log one line at a time: each line quoted (so it cannot pass
+ * for a line of the server's own), cut to `maxLine` characters, and at most `maxLines` lines.
+ */
+export function relayOutput(stream, write, { maxLine = 2000, maxLines = 1000 } = {}) {
+  let line = "";
+  let cutShort = false;
+  let lines = 0;
+  const emit = () => {
+    if (lines < maxLines) write(`run process: ${JSON.stringify(line.toWellFormed())}${cutShort ? " (cut)" : ""}`);
+    else if (lines === maxLines) write(`run process: more than ${maxLines} lines; the rest is not logged`);
+    lines += 1;
+    line = "";
+    cutShort = false;
+  };
+  stream.setEncoding("utf8");
+  stream.on("data", (/** @type {string} */ chunk) => {
+    let start = 0;
+    while (start < chunk.length) {
+      const newline = chunk.indexOf("\n", start);
+      const end = newline === -1 ? chunk.length : newline;
+      const room = maxLine - line.length;
+      if (end - start > room) cutShort = true;
+      if (room > 0) line += chunk.slice(start, start + Math.min(room, end - start));
+      if (newline === -1) break;
+      emit();
+      start = newline + 1;
+    }
+  });
+  stream.on("end", () => {
+    if (line || cutShort) emit();
+  });
+}
+
 export function childEnv(env = process.env, overrides = {}) {
   const passed = Object.fromEntries(Object.entries(env).filter(([name, value]) => passes(name) && value !== undefined));
   return { ...passed, ...overrides };
@@ -49,11 +83,12 @@ export function childEnv(env = process.env, overrides = {}) {
  * server must then run as root, as it does in the Docker image.
  *
  * @param {object} job
- * @param {{ timeoutMs?: number, signal?: AbortSignal, killAfterMs?: number, runAs?: { uid: number, gid: number, home?: string } | null, child?: string }} [options]
- *   `child`: the program to run instead of run-child.js (the tests give their own)
+ * @param {{ timeoutMs?: number, signal?: AbortSignal, killAfterMs?: number, runAs?: { uid: number, gid: number, home?: string } | null, child?: string, log?: Pick<Console, "log" | "error"> }} [options]
+ *   `child`: the program to run instead of run-child.js (the tests give their own); `log`: where
+ *   the run process's own output goes, quoted and bounded
  * @returns {Promise<{ outcome: string, error: string | null, results: any[], blocked: string[] }>}
  */
-export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs = null, child: program = CHILD } = {}) {
+export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs = null, child: program = CHILD, log = console } = {}) {
   return new Promise((resolve) => {
     const results = [];
     const blocked = [];
@@ -65,12 +100,19 @@ export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs =
       // would otherwise load .env (WORKER_TOKEN) into the run's own environment.
       execArgv: [],
       env: childEnv(process.env, runAs?.home ? { HOME: runAs.home } : {}),
-      stdio: ["ignore", "inherit", "inherit", "ipc"],
+      stdio: ["ignore", "pipe", "pipe", "ipc"],
       serialization: "json",
       ...(runAs ? { uid: runAs.uid, gid: runAs.gid } : {}),
     });
 
+    if (child.stdout) relayOutput(child.stdout, (line) => log.log(line));
+    if (child.stderr) relayOutput(child.stderr, (line) => log.error(line));
+
+    // Once the run is stopped, or the process has said it is done, failed or sent something it
+    // should not, nothing more it sends is taken.
+    let closed = false;
     const stop = (why) => {
+      closed = true;
       outcome ??= why;
       child.kill("SIGTERM");
       setTimeout(() => child.kill("SIGKILL"), killAfterMs).unref();
@@ -92,18 +134,27 @@ export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs =
       error ??= "The run process sent a malformed message.";
       stop("error");
     };
+    // One result for each journey and mode of the job, and no other.
+    const expected = new Set((job?.journeys ?? []).flatMap((j) => (job?.modes ?? []).map((mode) => `${j.path}\n${mode}`)));
+    const taken = new Set();
     child.on("message", (/** @type {any} */ message) => {
+      if (closed) return;
       if (message?.type === "result") {
         const refused = blockedOf(message.blocked ?? []);
         if (!isResult(message.result) || !refused) return malformed();
+        const key = `${message.result.journey}\n${message.result.mode}`;
+        if (!expected.has(key) || taken.has(key)) return malformed();
+        taken.add(key);
         results.push(message.result);
         blocked.push(...refused);
       } else if (message?.type === "done") {
+        closed = true;
         outcome ??= "done";
       } else if (message?.type === "error") {
         if (typeof message.message !== "string") return malformed();
+        closed = true;
         outcome ??= "error";
-        error = message.message.slice(0, 100_000);
+        error ??= message.message.slice(0, 100_000);
       } else {
         malformed();
       }

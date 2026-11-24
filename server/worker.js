@@ -465,7 +465,7 @@ export function createWorker({
         chromiumSandbox: config.chromiumSandbox,
       };
       const runAs = config.runAs ? { ...config.runAs, home: dirs.home } : null;
-      const outcome = await execute(job, { timeoutMs: config.runTimeoutMs, signal: current.signal, runAs });
+      const outcome = await execute(job, { timeoutMs: config.runTimeoutMs, signal: current.signal, runAs, log });
       if (outcome.outcome === "aborted") {
         // The server is shutting down (a deploy, say): put the run back for the next instance.
         await db.requeue(run.id);

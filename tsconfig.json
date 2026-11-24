@@ -1,11 +1,12 @@
 {
   // `npm run typecheck`: tsc checks the JavaScript of the hosted service (server/) and the tool
-  // (src/) from their JSDoc, without compiling anything. The dashboard (web/) has its own.
+  // (src/) from their JSDoc, without compiling anything. The dashboard (web/) has its own. The
+  // ES2024 library matches engines (Node 22.8), e.g. String.prototype.toWellFormed.
   "compilerOptions": {
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
     "allowJs": true,
     "checkJs": true,
     "noEmit": true,

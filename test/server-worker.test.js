@@ -258,6 +258,49 @@ describe("worker, with a fake run process", () => {
     assert.ok(Array.from(error).length <= 500);
   });
 
+  it("looks at a bounded slice of a huge text only, when it cuts it (R7.5)", async () => {
+    // Every cut cleans its text with toWellFormed; record how long the strings it sees are.
+    const seen = [];
+    const real = String.prototype.toWellFormed;
+    String.prototype.toWellFormed = function () {
+      seen.push(this.length);
+      return real.call(this);
+    };
+    try {
+      const huge = "h".repeat(1_000_000);
+      summarizeRun({ results: [], blocked: [huge], outcome: "done" }, [], [huge]);
+      const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+      const fake = fakeSupabase({ runs: [run] });
+      await createWorker({ db: dbOf(fake), catalog, config, execute: async () => ({ outcome: "error", error: huge, results: [], blocked: [] }), lookup, log: quiet }).tick();
+      assert.equal(fake.run(run.id).status, "failed");
+    } finally {
+      String.prototype.toWellFormed = real;
+    }
+    assert.ok(seen.length > 0);
+    assert.ok(Math.max(...seen) <= 2 * 500 + 2, `longest text cleaned: ${Math.max(...seen)}`);
+  });
+
+  it("quotes a run's base URL in the log, and cuts a refusal's reason to its first line (R7.5)", async () => {
+    const run = queued({ base_url: "https://x.example/\nrun 1: done", journeys: [BASIC] });
+    const fake = fakeSupabase({ runs: [run] });
+    const lines = [];
+    await createWorker({ db: dbOf(fake), catalog, config, execute: executeNothing, lookup, log: { log: (m) => lines.push(m), error: (m) => lines.push(m) } }).tick();
+    // Quoted, and only its first line: the forged part never reaches the log.
+    assert.ok(lines.some((m) => m.endsWith('started ("https://x.example/")')), lines.join(" | "));
+
+    const second = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
+    const fake2 = fakeSupabase({ runs: [second] });
+    fake2.failures.push({ op: "rpc", name: "worker_save_report", error: { code: "23514", message: "first line\nrun 9: forged" } });
+    const execute = async (job) => {
+      await writeFile(join(job.outDir, "a.md"), "x");
+      return { outcome: "done", error: null, results: [summary(BASIC, "walker")], blocked: [] };
+    };
+    const lines2 = [];
+    await createWorker({ db: dbOf(fake2), catalog, config, execute, lookup, log: { log: (m) => lines2.push(m), error: (m) => lines2.push(m) } }).tick();
+    assert.ok(lines2.some((m) => /left out "a\.md" \(worker_save_report: first line\)$/.test(m)), lines2.join(" | "));
+    assert.ok([...lines, ...lines2].every((m) => !m.includes("\n")), "no line holds a newline");
+  });
+
   it("quotes a file's name in the log, so a newline in it cannot forge a line (R6.2)", async () => {
     const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC] });
     const fake = fakeSupabase({ runs: [run] });
@@ -950,18 +993,25 @@ describe("a run's summary fits the database's 64 KiB check (R5.1)", () => {
 });
 
 describe("the run process's output is checked before it is used (R6.2)", () => {
-  /** Run a probe in place of run-child.js that sends `messages`, then exits. */
-  const probe = async (messages) => {
+  const good = { journey: "targets/x.journey.js", name: "X", mode: "walker", status: "pass", error: null, checks_total: 2, checks_passed: 2, errors: 0, warnings: 1, report_base: "x.walker" };
+  const JOB = { journeys: [{ path: good.journey, file: "unused" }], modes: ["walker", "virtual"] };
+  /**
+   * Run a probe in place of run-child.js that sends `messages` (and writes `output` to its stdout),
+   * then exits. Resolves to executeRun's outcome, and the lines it logged.
+   */
+  const probe = async (messages, { job = JOB, output = "" } = {}) => {
     const folder = await mkdtemp(join(tmpdir(), "srj-probe-"));
     try {
       const file = join(folder, "probe.mjs");
-      await writeFile(file, `process.on("message", () => { for (const m of ${JSON.stringify(messages)}) process.send(m); process.disconnect(); });\n`);
-      return await executeRun({}, { timeoutMs: 10000, child: file });
+      // Each message is sent once the one before it is out, and the channel closed after the last.
+      await writeFile(file, `process.on("message", () => { process.stdout.write(${JSON.stringify(output)}); const all = ${JSON.stringify(messages)}; const next = () => (all.length ? process.send(all.shift(), next) : process.disconnect()); next(); });\n`);
+      const lines = [];
+      const outcome = await executeRun(job, { timeoutMs: 10000, child: file, log: { log: (m) => lines.push(m), error: (m) => lines.push(m) } });
+      return Object.assign(outcome, { lines });
     } finally {
       await rm(folder, { recursive: true, force: true });
     }
   };
-  const good = { journey: "targets/x.journey.js", name: "X", mode: "walker", status: "pass", error: null, checks_total: 2, checks_passed: 2, errors: 0, warnings: 1, report_base: "x.walker" };
 
   it("takes well-formed results and refusals, and cuts long refusals", async () => {
     const outcome = await probe([{ type: "result", result: good, blocked: ["a.example:443 (private)", "b".repeat(5000)] }, { type: "done" }]);
@@ -981,6 +1031,9 @@ describe("the run process's output is checked before it is used (R6.2)", () => {
     ["no result", { type: "result" }],
     ["an error that is not text", { type: "error", message: { toString: 1 } }],
     ["a message of no known type", { type: "surprise" }],
+    ["a count over the ceiling", { type: "result", result: { ...good, warnings: 1_000_001 } }],
+    ["a result for a journey the job does not have (R7.5)", { type: "result", result: { ...good, journey: "x\ud800\u0000.yml" } }],
+    ["a result for a mode the job does not have (R7.5)", { type: "result", result: { ...good, mode: "zzz" } }],
   ]) {
     it(`ends the run as an error on ${what}`, async () => {
       const outcome = await probe([message, { type: "done" }]);
@@ -989,6 +1042,42 @@ describe("the run process's output is checked before it is used (R6.2)", () => {
       assert.deepEqual(outcome.results, []);
     });
   }
+
+  it("takes one result for each journey and mode, and none twice (R7.5)", async () => {
+    const twice = await probe([{ type: "result", result: good }, { type: "result", result: good }, { type: "done" }]);
+    assert.equal(twice.outcome, "error");
+    assert.equal(twice.error, "The run process sent a malformed message.");
+    assert.deepEqual(twice.results, [good], "only the first");
+    const both = await probe([{ type: "result", result: good }, { type: "result", result: { ...good, mode: "virtual" } }, { type: "done" }]);
+    assert.equal(both.outcome, "done");
+    assert.equal(both.results.length, 2);
+  });
+
+  it("takes nothing after a malformed message, or after it said it was done or failed (R7.5)", async () => {
+    const afterBad = await probe([{ type: "surprise" }, { type: "result", result: good }, { type: "error", message: "a later error" }]);
+    assert.deepEqual([afterBad.outcome, afterBad.error, afterBad.results], ["error", "The run process sent a malformed message.", []]);
+    const afterDone = await probe([{ type: "done" }, { type: "result", result: good }]);
+    assert.deepEqual([afterDone.outcome, afterDone.results], ["done", []]);
+    const afterError = await probe([{ type: "error", message: "first" }, { type: "error", message: "second" }, { type: "result", result: good }]);
+    assert.deepEqual([afterError.outcome, afterError.error, afterError.results], ["error", "first", []]);
+  });
+
+  it("keeps at most 100,000 characters of the process's error (R7.5)", async () => {
+    const outcome = await probe([{ type: "error", message: "e".repeat(200_000) }]);
+    assert.equal(outcome.error.length, 100_000);
+  });
+
+  it("logs the process's own output quoted, one line at a time, cut and bounded (R7.5)", async () => {
+    const output = `one\nrun 1: done (forged)\n${"z".repeat(3000)}\n${"n\n".repeat(1100)}`;
+    const { lines } = await probe([{ type: "done" }], { output });
+    const relayed = lines.filter((m) => m.startsWith("run process:"));
+    assert.equal(relayed[0], 'run process: "one"');
+    assert.equal(relayed[1], 'run process: "run 1: done (forged)"', "quoted, so it cannot pass for a line of the server's");
+    assert.ok(relayed[2].endsWith('" (cut)') && relayed[2].length < 2100, relayed[2].slice(-40));
+    assert.equal(relayed.length, 1001);
+    assert.match(relayed.at(-1), /more than 1000 lines; the rest is not logged/);
+    assert.ok(lines.every((m) => !m.includes("\n")));
+  });
 
   it("stores only well-formed text: no lone surrogate and no NUL in names, refusals or errors", () => {
     const summary = summarizeRun({ results: [], blocked: ["host\u0000.example:443 (private)", "\ud800x.example:443 (private)"], outcome: "done" }, [], ["\ud800.md", "a\u0000b.md"]);
