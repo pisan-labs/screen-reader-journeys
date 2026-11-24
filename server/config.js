@@ -55,8 +55,11 @@ export function loadConfig(env = process.env) {
     // The worker's proof to the worker_* functions; the database keeps only its SHA-256.
     workerToken: need("WORKER_TOKEN"),
   };
-  if (config.workerToken && config.workerToken.length < 32) problems.push("WORKER_TOKEN must be at least 32 characters (make one with: openssl rand -base64 32)");
-  if (config.workerToken && config.workerToken.length > 200) problems.push("WORKER_TOKEN must be at most 200 characters");
+  // Printable ASCII only, so the server and the database count it the same way, and stray
+  // whitespace or a pasted newline is caught here rather than as "Bad worker token." later.
+  if (config.workerToken && !/^[\x21-\x7e]{32,200}$/.test(config.workerToken)) {
+    problems.push("WORKER_TOKEN must be 32 to 200 printable ASCII characters, without spaces (make one with: openssl rand -base64 32)");
+  }
   // HintWise apps never hold the service-role key; refuse to start with one in reach.
   if (!blank(env.SUPABASE_SERVICE_ROLE_KEY)) problems.push("SUPABASE_SERVICE_ROLE_KEY is set: remove it. This server needs only the anon key and WORKER_TOKEN");
   const attempt = (fn) => {

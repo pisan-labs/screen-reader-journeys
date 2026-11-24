@@ -93,6 +93,20 @@ a {
   text-underline-offset: 0.15em;
 }
 
+/* A button that downloads, styled as a link in running text and tables. */
+.link-button {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+  text-decoration-thickness: 0.08em;
+  text-underline-offset: 0.15em;
+  cursor: pointer;
+}
+
 /* Visible focus for everything that can be reached with Tab. Outlines also show in Windows'
    forced-colours mode. */
 :focus-visible {

@@ -13,3 +13,31 @@ Append-only journal, oldest first. Earlier history: `git log` and `docs/handoff.
 2026-11-23 [decision] Owner: the worker gets its own Render service, free plan to start; TypeScript for the dashboard, tsc --checkJs for server and CLI; no relay scheduled tasks for this session.
 
 2026-11-23 [code] Runs move to schema app_screen_reader_journeys (0001_runs.sql); the worker uses token-checked worker_* functions, no service-role key; reports move from Storage to run_reports.
+
+2026-11-23 [code] Dashboard moves to Vite and TypeScript with the platform's sign-in (Google, emailed code), Delete my account, the HintWise footer, favicon, hw-events.js and a privacy note.
+
+2026-11-23 [code] The tool now follows focus into open shadow roots; it reported the HintWise footer's host element instead of its links.
+
+2026-11-23 [decision] Owner (via PManager): the worker's own Render service is on the free plan; PManager generates WORKER_TOKEN and pins its hash at release.
+
+2026-11-23 [code] Review of #10, R1.1 to R1.7: safer report saving, downloads as octet-stream on click, per-run caps, retention (20 runs, 30 days, proposed), clock-free SQL test, ASCII token rule.
+
+2026-11-23 [decision] PManager: retention and caps as proposed (20 runs per person, 30 days, 200 files, 20 MiB per run); the privacy note says so.
+
+2026-11-23 [code] Review of #11, R2.1 (major): the worker stops RUN_AS_UID's processes, lists without following links and opens reports with O_NOFOLLOW; R2.2-R2.4, R2.6-R2.8 fixed; R2.5 to PR 3.
+
+2026-11-23 [code] run_results: unique (run_id, journey, mode), and results must be for the run's own journeys and modes.
+
+2026-11-23 [code] Review of #11 round 2: the run's work folder stays root-owned, the reports folder is checked before reading, processes are killed by user (kill -1 as that user) and counted by thread, hard links are refused.
+
+2026-11-23 [decision] PManager: tini as PID 1 in the image (ENTRYPOINT ["/usr/bin/tini", "--"]), so orphaned zombies are reaped.
+
+2026-11-23 [code] Review of #11 round 3: the stop also kills each pid from root and limits the helper; a failed stop reads and deletes nothing and ends the server; tini -s.
+
+2026-11-24 [decision] Owner ("SR fix 1", via PManager): fix R2.F-1 by reading and deleting the run's files as the run's user, and a stop that is proven by a completed kill(-1) as that user.
+
+2026-11-24 [code] R2.F-1 to R2.F-3: report-child.js reads and clears as RUN_AS_UID over IPC, root only rmdirs; the stop returns only after a completed kill(-1) helper and an empty scan; pause timers cleared.
+
+2026-11-24 [code] R2.G-1, R2.G-3: the kill helper starts as root and drops to the user with no exec, so the user cannot trace it; the helper-limit test is deterministic.
+
+2026-11-24 [code] R2.G-2, R2.G-4, R2.G-5: a partial clear ends the server; the child's answers are checked, the whole read is bounded; tests fail if root reads or deletes.

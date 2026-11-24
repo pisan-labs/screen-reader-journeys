@@ -9,7 +9,7 @@ const STATE_PROPERTIES = ["expanded", "checked", "pressed", "selected", "disable
  * focus indicator, and a short selector for reports.
  */
 export async function describeFocusChromium(page, cdp) {
-  const { result } = await cdp.send("Runtime.evaluate", { expression: "document.activeElement", objectGroup: "srj" });
+  const { result } = await cdp.send("Runtime.evaluate", { expression: DEEP_ACTIVE_ELEMENT, objectGroup: "srj" });
   let ax = null;
   if (result?.objectId) {
     try {
@@ -56,9 +56,23 @@ export async function describeFocusPortable(page) {
   return { role, name, description: "", states: {}, ...dom };
 }
 
+/**
+ * The element that really has focus. document.activeElement stops at a shadow host (a custom
+ * element such as the HintWise footer), so follow open shadow roots down to the focused element.
+ */
+const DEEP_ACTIVE_ELEMENT = "(() => { let el = document.activeElement; while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement; return el; })()";
+
 /** Runs in the page. */
 function domFacts() {
-  const el = document.activeElement;
+  let el = document.activeElement;
+  while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;
+  /** Like el.closest(selector), but also through the shadow hosts above it. */
+  const closestAcross = (node, selector) => {
+    for (let at = node; at; at = at.parentElement ?? at.getRootNode().host ?? null) {
+      if (at.matches?.(selector)) return at;
+    }
+    return null;
+  };
   if (!el || el === document.body || el === document.documentElement) {
     return { tag: "body", selector: "body", domId: 0, isBody: true, insideAriaHidden: false, focusIndicator: null, visible: true };
   }
@@ -73,7 +87,7 @@ function domFacts() {
     selector,
     domId: window.__srj?.idOf?.(el) ?? null,
     isBody: false,
-    insideAriaHidden: !!el.closest('[aria-hidden="true"]'),
+    insideAriaHidden: !!closestAcross(el, '[aria-hidden="true"]'),
     // A heuristic: an outline or box-shadow while focused. Other indicators (background, border,
     // underline) are not detected and show as missing.
     focusIndicator: outline || shadow || null,

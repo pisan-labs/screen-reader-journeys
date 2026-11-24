@@ -143,3 +143,25 @@ sign-in label `screen-reader-journeys`.
 2. **TypeScript scope:** TypeScript for the dashboard, which is being rewritten anyway. The
    server and the CLI stay JavaScript, checked by `tsc --checkJs` with JSDoc types and linted,
    rather than rewritten.
+
+## What was built (added 23 November 2026, after the review of #10)
+
+The fix for the service-role key was built as proposed above, with these differences. The review
+of #10 (R1.6) asked for them to be recorded here.
+
+- **Seven worker functions, not four:**
+  - `worker_claim_next_run`, `worker_save_report`, `worker_add_results` and `worker_finish_run`
+    are the four proposed;
+  - `worker_fail_stale_runs` takes the job the old worker did with a direct update, and
+    `worker_requeue_run` puts a run back on shutdown;
+  - `worker_prune_runs` (retention) came with the review's R1.4.
+- **Each report may be up to 2 MiB, not 1 MB,** with at most 200 files and 20 MiB per run (R1.4).
+- **People may delete their own runs.** The proposal gave them only read and insert. Deleting a
+  run (or the account) removes its results and reports by cascade. This lets people remove what
+  they stored, and the dashboard offers it for finished runs.
+- **Every token is refused until the hash is pinned.** Delivery Canary accepted any well-formed
+  token until then. The token must be 32 to 200 printable ASCII characters, in the server and in
+  the database alike (R1.7).
+- **Reports are text with NUL replaced by U+FFFD** (R1.1). They are downloaded one at a time as
+  `application/octet-stream` (R1.2, R1.3).
+

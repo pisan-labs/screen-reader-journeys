@@ -100,10 +100,12 @@ describe("settings", () => {
     assert.throws(() => loadConfig({}), (e) => /SUPABASE_URL is not set/.test(e.message) && /SUPABASE_ANON_KEY is not set/.test(e.message) && /WORKER_TOKEN is not set/.test(e.message));
   });
 
-  it("keeps the worker token, and refuses one that is too short", () => {
+  it("keeps the worker token, and refuses one that is not 32 to 200 printable ASCII characters", () => {
     assert.equal(loadConfig(env).workerToken, env.WORKER_TOKEN);
-    assert.throws(() => loadConfig({ ...env, WORKER_TOKEN: "short" }), /WORKER_TOKEN must be at least 32 characters/);
-    assert.throws(() => loadConfig({ ...env, WORKER_TOKEN: "x".repeat(201) }), /WORKER_TOKEN must be at most 200 characters/);
+    assert.equal(loadConfig({ ...env, WORKER_TOKEN: "Zm9vYmFyYmF6cXV4K3Rlc3QvdG9rZW4vMDEyMzQ1Njc=" }).workerToken.length, 44, "openssl rand -base64 32");
+    for (const bad of ["short", "x".repeat(201), `${"x".repeat(31)} y`, "\u{1F600}".repeat(20), `${"x".repeat(40)}\u00e9`]) {
+      assert.throws(() => loadConfig({ ...env, WORKER_TOKEN: bad }), /WORKER_TOKEN must be 32 to 200 printable ASCII characters/, JSON.stringify(bad));
+    }
   });
 
   it("refuses to start with the service-role key in its environment", () => {
