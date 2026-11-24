@@ -152,8 +152,10 @@ shared with other apps). It needs a service of its own, built from this reposito
   forbidden setting stops the service at start-up, with a list of what is wrong.
 
   **On the first deploy, check that the worker started.** If the log says
-  `not starting the worker: ... fs.suid_dumpable ...`, the host would let a run trace the helper
-  that stops its processes (see Security), so the service exits and runs nothing. That is a
+  `not starting the worker: the host's fs.suid_dumpable is ...` or
+  `not starting the worker: cannot read /proc/sys/fs/suid_dumpable (...)`, the host would let a
+  run trace the helper that stops its processes, or this cannot be checked (see Security), so
+  the service exits and runs nothing. That is a
   setting of Render's host, not of the image: it cannot be fixed from here, so ask Render, or run
   the worker on another host.
 
@@ -298,9 +300,11 @@ domain only you control, where you can.
       runs as the run's user lists and reads the reports, and sends them to the server over IPC.
       The server checks each answer (its shape, and paths inside the folder), and the child's
       answers together have a time limit of two minutes (the database's writes in between do not
-      count). Another child empties `reports/` and `home/` at the end. Root then
-      removes the two folders and the work folder one at a time with `rmdir`, which never follows
-      a link and fails on a folder that is not empty. Whatever a process of that user might
+      count), and the whole save, writes included, five minutes. Files still waiting then, and
+      every file after the 200th, are left out without asking the child or the database.
+      Another child empties `reports/` and `home/` at the end. Root then removes the two folders
+      and the work folder one at a time with `rmdir`, which never follows a link and fails on a
+      folder that is not empty. Whatever a process of that user might
       still do, reading and deleting reach only what that user may anyway. The child first makes
       `reports/`, `home/` and every folder of that user's below them writable again, so a folder
       the run made read-only does not stay. **If anything is still left** (or root's `rmdir`
