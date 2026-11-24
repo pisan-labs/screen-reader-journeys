@@ -22,11 +22,13 @@ const matches = (text, pattern) =>
 
 /** The commands a journey uses. Every key press goes through the real browser keyboard. */
 class Session {
-  constructor(page, driver, result) {
+  constructor(page, driver, result, onStep = null) {
     this.page = page;
     this.driver = driver;
     this.result = result;
     this.findingIndex = new Map();
+    /** Told of each step as it is recorded (the hosted service shows a run's progress with it). */
+    this.onStep = onStep;
   }
 
   get mode() {
@@ -46,6 +48,7 @@ class Session {
       spoken,
     };
     this.result.steps.push(step);
+    this.onStep?.(step);
     if (focus) for (const finding of checkFocus(focus)) this.addFinding(finding, focus, step.n);
     return step;
   }
@@ -205,9 +208,9 @@ class Session {
  * guard proxy).
  *
  * @param {any} journey
- * @param {{ mode: string, baseUrl: string, headed?: boolean, launchOptions?: { args?: string[], [key: string]: any } }} options
+ * @param {{ mode: string, baseUrl: string, headed?: boolean, launchOptions?: { args?: string[], [key: string]: any }, onStep?: ((step: any) => void) | null }} options
  */
-export async function runJourney(journey, { mode, baseUrl, headed = false, launchOptions = {} }) {
+export async function runJourney(journey, { mode, baseUrl, headed = false, launchOptions = {}, onStep = null }) {
   const Driver = DRIVERS[mode];
   if (!Driver) throw new Error(`Unknown mode "${mode}". Modes: ${Object.keys(DRIVERS).join(", ")}`);
   const url = new URL(journey.start, baseUrl).href;
@@ -259,7 +262,7 @@ export async function runJourney(journey, { mode, baseUrl, headed = false, launc
     await settle(page, 300);
     driver.page = page;
     await driver.start();
-    await journey.run(new Session(page, driver, result));
+    await journey.run(new Session(page, driver, result, onStep));
   } catch (error) {
     if (!(error instanceof StopJourney)) {
       result.status = "error";

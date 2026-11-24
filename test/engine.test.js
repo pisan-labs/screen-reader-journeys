@@ -20,8 +20,14 @@ const rules = (result) => result.findings.map((f) => f.rule).sort();
 
 describe("walker mode", () => {
   let result;
+  const stepsSeen = [];
   before(async () => {
-    result = await runJourney(journey, { mode: "walker", baseUrl: site.url });
+    result = await runJourney(journey, { mode: "walker", baseUrl: site.url, onStep: (step) => stepsSeen.push(step.n) });
+  });
+
+  it("tells onStep of each step as it is recorded (the hosted service shows progress with it)", () => {
+    assert.deepEqual(stepsSeen, result.steps.map((s) => s.n));
+    assert.ok(stepsSeen.length > 0);
   });
 
   it("reaches Save, announces the status and passes its checks", () => {

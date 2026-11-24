@@ -4,6 +4,7 @@
 //   GET  /journeys    the journeys and modes this server runs, and the sites it may test
 //   POST /runs        queue a run (signed in): { base_url, journeys: [path], modes: [mode] }
 //   GET  /runs/:id    a run and its results (signed in, your own runs only)
+//   GET  /runs/:id/progress   where a run in progress is (signed in, your own runs only)
 //
 // `auth.getUser(jwt)` verifies a Supabase access token (supabase.auth from an anon-key client).
 // `userClient(jwt)` returns a Supabase client that acts as that user, so row-level security
@@ -54,7 +55,7 @@ function readJson(req) {
 
 const byJourneyAndMode = (a, b) => a.journey.localeCompare(b.journey) || a.mode.localeCompare(b.mode);
 
-export function createHandler({ config, catalog, auth, userClient, version = "dev", log = console }) {
+export function createHandler({ config, catalog, auth, userClient, version = "dev", log = console, progress = (_id) => null }) {
   const journeyList = catalog.map(({ path, name, description }) => ({ path, name, description }));
 
   async function authenticate(req) {
@@ -107,11 +108,29 @@ export function createHandler({ config, catalog, auth, userClient, version = "de
     return [200, { run: data }];
   }
 
+  /**
+   * Where a run in progress is (the worker's progressOf), for its owner only: the run is read first
+   * through their own client, so row level security decides. { progress: null } when this server
+   * is not running it (queued, finished, or another instance's).
+   */
+  async function getProgress(req, id) {
+    const who = await signedIn(req);
+    if (!isUuid(id)) return [404, { error: "No such run." }];
+    const { data, error } = await userClient(who.token).from("runs").select("id").eq("id", id).maybeSingle();
+    if (error) {
+      log.error(`read run: ${error.code ?? ""} ${error.message}`);
+      return [502, { error: "The run could not be read. Try again in a moment." }];
+    }
+    if (!data) return [404, { error: "No such run, or it is not yours." }];
+    return [200, { progress: progress(id) ?? null }];
+  }
+
   const routes = [
     { path: /^\/health$/, GET: () => [200, { status: "ok", version }] },
     { path: /^\/journeys$/, GET: () => [200, { journeys: journeyList, modes: SERVER_MODES, allowed_hosts: config.targetRules.map((r) => r.text) }] },
     { path: /^\/runs$/, POST: (req) => createRun(req) },
     { path: /^\/runs\/([^/]+)$/, GET: (req, id) => getRun(req, id) },
+    { path: /^\/runs\/([^/]+)\/progress$/, GET: (req, id) => getProgress(req, id) },
   ];
 
   return async function handle(req, res) {

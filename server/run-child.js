@@ -27,6 +27,9 @@ export function summarizeResult(result, path) {
   };
 }
 
+/** How often, at most, a run's progress reports its step. */
+export const PROGRESS_EVERY_MS = 1000;
+
 /**
  * job: { baseUrl, journeys: [{ path, file }], modes, outDir, allowedTargetHosts, chromiumSandbox }
  * send(message): receives { type: "result", result, blocked } after each journey and mode.
@@ -51,7 +54,15 @@ export async function runJob(job, send, { lookup } = {}) {
     for (const { path, file } of job.journeys) {
       const journey = await loadJourney(file);
       for (const mode of job.modes) {
-        const result = await runJourney(journey, { mode, baseUrl: job.baseUrl, launchOptions });
+        // Progress for the run's page: this journey and mode, then its steps, at most one a second.
+        send({ type: "progress", journey: path, mode });
+        let told = 0;
+        const onStep = (step) => {
+          if (Date.now() - told < PROGRESS_EVERY_MS) return;
+          told = Date.now();
+          send({ type: "progress", journey: path, mode, step: String(step.action).slice(0, 200), n: step.n });
+        };
+        const result = await runJourney(journey, { mode, baseUrl: job.baseUrl, launchOptions, onStep });
         results.push(result);
         await writeReports(results, job.outDir);
         send({ type: "result", result: summarizeResult(result, path), blocked: proxy.blocked.splice(0) });

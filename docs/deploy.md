@@ -8,7 +8,7 @@ some journeys, and read the transcripts when the run finishes. It follows claude
 ```
   Browser ──────────────► Netlify: web/ (static dashboard)
      │                        │
-     │ sign in, list runs,    │ GET /journeys, POST /runs, GET /runs/:id
+     │ sign in, list runs,    │ GET /journeys, POST /runs, GET /runs/:id(/progress)
      │ read reports           ▼
      │                    Render: server/ (Docker: HTTP API + worker + Chromium)
      ▼                        │  the API acts as the signed-in person (row level security);
@@ -291,6 +291,15 @@ straight into the table.
 where you can.
 
 ## Operations
+
+- **A run's progress.** While a run is running, its page shows which journey and mode it is on
+  ("Running 2 of 4: …"), the results so far, the step, and the time against the time limit. The
+  worker holds this in memory, from the run process's checked messages (a "progress" message
+  when a journey and mode starts, and its step at most once a second), and the API serves it to
+  the run's owner only (`GET /runs/:id/progress`, which reads the run through the person's own
+  client first). Nothing is stored: a server that is not running the run answers
+  `{ "progress": null }`. The page's status line says the journey and the results when they
+  change, not the step or the clock.
 
 - **Updates.**
   - Netlify builds on every push to `main`. Render deploys as its service is set up.
