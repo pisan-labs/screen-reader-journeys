@@ -316,9 +316,12 @@ where you can.
 - **Timeouts.** A run that takes longer than `RUN_TIMEOUT_SECONDS` is stopped, browser included.
   The journeys that finished keep their results.
   - Each journey opens its page when the page's load event fires, within 120 s, then waits at most
-    5 s more for the network to go quiet. A page that keeps a request open (an ad or analytics
-    request, a long poll, a stream) is tested anyway; one whose load event never fires is not
-    (`src/journey.js`, `LOAD_TIMEOUT_MS` and `IDLE_WAIT_MS`).
+    15 s more for the network to go quiet (and up to 20 s more for a journey's `ready` element),
+    all within the run's `RUN_TIMEOUT_SECONDS` (`src/journey.js`, `LOAD_TIMEOUT_MS` and
+    `IDLE_WAIT_MS`). A page that keeps a request open (an ad or analytics request, a long poll, a
+    stream) is tested anyway, and its transcript says the page may not have finished loading. A
+    page whose load event never fires is not tested, and a site that never loads uses up the run:
+    about 7 of 12 journey runs fit in 900 s.
   - When Render restarts the service (a deploy, say), the run in progress goes back in the queue.
   - A run left `running` by a service that crashed is marked failed ten minutes after its timeout.
 - **Limits.**

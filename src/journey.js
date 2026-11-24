@@ -1,7 +1,7 @@
 // Runs one journey in one mode and records what was heard at each step.
 
 import { pathToFileURL } from "node:url";
-import { chromium, webkit } from "playwright";
+import { chromium, errors, webkit } from "playwright";
 import { DRIVERS, settle } from "./drivers.js";
 import { installRecorder } from "./recorder.js";
 import { checkFocus, describeMatcher, matchesFocus, speakFocus } from "./focus.js";
@@ -204,17 +204,21 @@ class Session {
 
 /**
  * How long a page may take to fire its load event. A heavy page on a slow host needs far more
- * than Playwright's 30 s: https://www.washington.edu/ fired it after 5 s here, and after 42 to
- * 50 s at 0.1 CPU (Render's free plan), so this leaves about 2.4 times that.
+ * than Playwright's 30 s: https://www.washington.edu/ fired it after 5 s in the build container,
+ * and after 42 to 50 s there at 0.1 CPU (Render's free plan), so this leaves about 2.4 times that.
+ * It counts against the run's RUN_TIMEOUT_SECONDS, like everything else a journey does.
  */
 export const LOAD_TIMEOUT_MS = 120_000;
 
 /**
  * After load, how long to wait, at most, for the network to go quiet (500 ms with no request
  * open). A page with a request that never ends (an analytics beacon, a long poll, a stream)
- * never goes quiet; it is tested all the same, once this has passed.
+ * never goes quiet; it is tested all the same once this has passed, and the transcript says the
+ * page may not have finished loading. 15 s lets content that comes from a slow or sleeping API
+ * arrive first (a sleeping Render service took 12.6 s to answer), at the cost of 15 s per
+ * journey and mode on a page that never goes quiet.
  */
-export const IDLE_WAIT_MS = 5_000;
+export const IDLE_WAIT_MS = 15_000;
 
 /**
  * Run one journey in one mode. `baseUrl` is the site under test, e.g. a pull request's preview.
@@ -272,16 +276,26 @@ export async function runJourney(journey, { mode, baseUrl, headed = false, launc
       list.push(String(error).split("\n")[0]);
     });
     if (journey.setup) await journey.setup(page);
+    const session = new Session(page, driver, result, onStep);
     // The load event, then a moment of network quiet if it comes. Waiting for quiet alone failed
     // every page that keeps a request open, such as https://www.washington.edu/ (an ad
-    // conversion request that never ends).
+    // conversion request that never ends). If it does not come, the transcript says so: the page
+    // may still have been fetching its content (R22.1-1). Only the wait's own timeout is
+    // passed over; anything else (the page or browser closing) fails the journey here.
     await page.goto(url, { waitUntil: "load", timeout: loadTimeoutMs });
-    await page.waitForLoadState("networkidle", { timeout: idleWaitMs }).catch(() => {});
+    const quiet = await page.waitForLoadState("networkidle", { timeout: idleWaitMs }).then(
+      () => true,
+      (error) => {
+        if (error instanceof errors.TimeoutError) return false;
+        throw error;
+      }
+    );
+    if (!quiet) session.note(`the network was still busy ${+(idleWaitMs / 1000).toFixed(1)} s after the page loaded, so the page may not have finished loading`);
     if (journey.ready) await page.locator(journey.ready).first().waitFor({ timeout: 20000 });
     await settle(page, 300);
     driver.page = page;
     await driver.start();
-    await journey.run(new Session(page, driver, result, onStep));
+    await journey.run(session);
   } catch (error) {
     if (!(error instanceof StopJourney)) {
       result.status = "error";
