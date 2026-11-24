@@ -126,6 +126,7 @@ describe("settings", () => {
     const config = loadConfig({ ...env, ALLOWED_ORIGINS: "https://srj.netlify.app, http://127.0.0.1:5173/", ALLOWED_TARGET_HOSTS: "*.vercel.app", PORT: "10000", RUN_TIMEOUT_SECONDS: "60", CHROMIUM_SANDBOX: "true" });
     assert.deepEqual(config.allowedOrigins, ["https://srj.netlify.app", "http://127.0.0.1:5173"]);
     assert.equal(config.targetRules[0].host, "vercel.app");
+    assert.deepEqual(loadConfig({ ...env, ALLOWED_TARGET_HOSTS: "*" }).targetRules.map((r) => [r.text, r.any]), [["*", true]], '"*" is any public site');
     assert.equal(config.port, 10000);
     assert.equal(config.runTimeoutMs, 60000);
     assert.equal(config.chromiumSandbox, true);
@@ -134,7 +135,8 @@ describe("settings", () => {
   for (const [name, value, message] of [
     ["ALLOWED_ORIGINS", "https://srj.netlify.app/app", /without a path/],
     ["ALLOWED_ORIGINS", "srj.netlify.app", /not a URL/],
-    ["ALLOWED_TARGET_HOSTS", "*", /ALLOWED_TARGET_HOSTS/],
+    ["ALLOWED_TARGET_HOSTS", "*:443", /ALLOWED_TARGET_HOSTS/],
+    ["ALLOWED_TARGET_HOSTS", "*.com", /ALLOWED_TARGET_HOSTS/],
     ["PORT", "abc", /PORT/],
     ["RUN_TIMEOUT_SECONDS", "-1", /RUN_TIMEOUT_SECONDS/],
   ]) {
@@ -233,6 +235,13 @@ describe("HTTP API", () => {
     assert.match(body.error, /3 runs/);
   });
 
+  it("POST /runs answers 429 with the reason when the daily limit refuses the run (0002)", async () => {
+    fake.failures.push({ op: "insert", table: "runs", error: { code: "53400", message: "You have started 10 runs today (UTC). Try again tomorrow." } });
+    const { status, body } = await call("POST", "/runs", { token: "alice-token", body: goodRun });
+    assert.equal(status, 429);
+    assert.equal(body.error, "You have started 10 runs today (UTC). Try again tomorrow.");
+  });
+
   it("GET /runs/:id returns your own run with its results, and nobody else's", async () => {
     const run = fake.tables.runs[0];
     fake.tables.run_results.push(
@@ -267,4 +276,53 @@ describe("HTTP API", () => {
     assert.equal(wrong.status, 405);
     assert.equal(wrong.headers.get("allow"), "POST");
   });
+});
+
+describe('HTTP API with ALLOWED_TARGET_HOSTS="*"', () => {
+  const ALICE = { id: "00000000-0000-4000-8000-00000000000a", email: "alice@example.org" };
+  let fake;
+  let server;
+  let base;
+  before(async () => {
+    fake = fakeSupabase({ users: { "alice-token": ALICE } });
+    const config = { allowedOrigins: [], targetRules: parseAllowedHosts("*") };
+    const handler = createHandler({ config, catalog, auth: fake.auth, userClient: () => fake.asUser(ALICE.id), version: "test", log: { error() {} } });
+    server = createServer(handler);
+    await new Promise((done) => server.listen(0, "127.0.0.1", done));
+    base = `http://127.0.0.1:${server.address().port}`;
+  });
+  after(() => server.close());
+  const post = async (base_url) => {
+    const response = await fetch(`${base}/runs`, { method: "POST", headers: { Authorization: "Bearer alice-token", "Content-Type": "application/json" }, body: JSON.stringify({ base_url, journeys: [HOME], modes: ["walker"] }) });
+    return { status: response.status, body: await response.json() };
+  };
+
+  it("lists * as the allowed hosts", async () => {
+    const body = await (await fetch(`${base}/journeys`)).json();
+    assert.deepEqual(body.allowed_hosts, ["*"]);
+  });
+
+  it("queues a run on any public site, for a signed-in person", async () => {
+    const { status, body } = await post("https://www.example.org/start");
+    assert.equal(status, 201, JSON.stringify(body));
+    assert.equal(body.run.base_url, "https://www.example.org/start");
+  });
+
+  for (const [url, why] of [
+    ["http://127.0.0.1/", /private or reserved/],
+    ["http://169.254.169.254/", /private or reserved/],
+    ["https://[::ffff:10.0.0.1]/", /private or reserved/],
+    ["https://localhost/", /local address/],
+    ["https://intranet/", /not a full host name/],
+    ["https://example.org:8443/", /ports 80 and 443 only/],
+    ["https://me:pw@example.org/", /user name or password/],
+  ]) {
+    it(`refuses ${url} with 400, and queues nothing`, async () => {
+      const before = fake.tables.runs.length;
+      const { status, body } = await post(url);
+      assert.equal(status, 400);
+      assert.match(body.error, why);
+      assert.equal(fake.tables.runs.length, before);
+    });
+  }
 });

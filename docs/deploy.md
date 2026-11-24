@@ -46,8 +46,8 @@ releases, and each production step waits for the owner's yes.
 
 ## 1. The database
 
-1. **Migrations.** `supabase/migrations/0001_runs.sql` creates everything in the schema
-   `app_screen_reader_journeys`, idempotently:
+1. **Migrations,** applied in order, each idempotently. `0001_runs.sql` creates everything in
+   the schema `app_screen_reader_journeys`; `0002_daily_cap.sql` adds the daily limit:
    - **`runs`.** Signed-in people read their own, queue new ones (status `queued` only, at most
      three waiting or running) and delete their own.
    - **`run_results` and `run_reports`.** People read their own.
@@ -57,6 +57,9 @@ releases, and each production step waits for the owner's yes.
      `worker_requeue_run`, `worker_save_report`, `worker_add_results` and `worker_finish_run`.
      Each checks the token's SHA-256 against `worker_config` and refuses every token until that
      row exists.
+   - **`run_counts`** (0002). How many runs each person started per UTC day, for the limit of 10
+     a day. Only a trigger writes it; nobody reads or changes it through the API, so deleting
+     one's runs does not reset it. It keeps today and yesterday.
 2. **Expose the schema** to the Data API (`expose-schema app_screen_reader_journeys`). Until then,
    PostgREST answers 406 for every request.
 3. **`check-schema app_screen_reader_journeys`** must pass before the first deploy.
@@ -110,7 +113,7 @@ shared with other apps). It needs a service of its own, built from this reposito
 | `SUPABASE_ANON_KEY` | the public anon key, from claude-built-apps `platform/supabase.json` |
 | `WORKER_TOKEN` | the token from step 2 (secret) |
 | `ALLOWED_ORIGINS` | `https://screen-reader-journeys.hintwise.org` |
-| `ALLOWED_TARGET_HOSTS` | the sites the server may test, as exact hosts (see below). Empty means none |
+| `ALLOWED_TARGET_HOSTS` | the sites the server may test, as exact hosts, or `*` for any public site (see below). Empty means none |
 
 - **Defaults.** `RUN_TIMEOUT_SECONDS` (900) and `POLL_INTERVAL_SECONDS` (5) are set in
   `render.yaml`, and `SUPABASE_TIMEOUT_SECONDS` defaults to 30.
@@ -243,11 +246,34 @@ cannot complete a real sign-in. Use the API with a token from the local stack in
 | `stem-accessibility.example.org` | `https://` and `http://` on that host, default port | `www.stem-accessibility.example.org`, other ports |
 | `*.vercel.app` | `https://` on any subdomain, e.g. `https://frontend-git-x.vercel.app` | `vercel.app` itself, `evilvercel.app`, `vercel.app.evil.com`, `http://` |
 | `127.0.0.1:4173` | that address and port, `http://` or `https://` | other ports, `localhost`, other loopback addresses |
+| `*` | any public site: `https://` or `http://`, ports 80 and 443 only | the addresses below, and other ports |
+
+**`*`, any public site.** Any signed-in person may then test any public address. It can stand
+alone, or with exact rules (`*, 127.0.0.1:4173`), which stay trusted as listed. Under `*` the
+server refuses, when the run is queued, again when it starts, and at every connection the
+browser makes (redirects and subresources included):
+
+- loopback, private networks, link-local (and so cloud metadata, `169.254.169.254` and
+  `fd00:ec2::254`), carrier-grade NAT, multicast, unspecified (`0.0.0.0`, `::`), documentation
+  and other reserved ranges, IPv4-mapped and other IPv6 forms that embed an IPv4 address;
+- a host name that resolves to any such address, even alongside public ones. The proxy resolves
+  each host once and connects to the address it checked, so a changed DNS answer cannot redirect
+  the connection;
+- `localhost` names, and single-label hosts such as `https://intranet/`, which would use the DNS
+  search path;
+- ports other than 80 and 443.
+
+`*` never makes a host "listed exactly": everything it admits is checked like that. A person may
+also start at most 10 runs a day (UTC, `0002_daily_cap.sql`), and have at most 3 waiting or
+running.
 
 The server also refuses:
 
 - addresses with a user name or password;
-- IP addresses and `localhost`, unless listed exactly;
+- IP addresses and `localhost`, unless listed exactly (under `*`, public IP addresses are
+  allowed);
+- for a connection to a host that is not listed exactly, any port but 80 and 443, in every mode,
+  so a tested page cannot use the server to reach other services on public hosts;
 - journeys that are not files in its own `targets/`. People choose journeys by path, so the
   server never runs code a person sends.
 
@@ -269,7 +295,8 @@ domain only you control, where you can.
   - When Render restarts the service (a deploy, say), the run in progress goes back in the queue.
   - A run left `running` by a service that crashed is marked failed ten minutes after its timeout.
 - **Limits.**
-  - Three runs waiting or running per person (`limit_active_runs`).
+  - Three runs waiting or running per person (`limit_active_runs`), and ten started per UTC day
+    (`limit_daily_runs`, 0002). Both answer 429 with the reason.
   - Per run: one result for each of the run's journeys and modes (a unique constraint), and at
     most 200 report files and 20 MiB of reports, of at most 2 MiB each.
   - A file is left out if it is a link or another non-file, is over 2 MiB, has a name the
@@ -357,8 +384,9 @@ domain only you control, where you can.
 - **Network guard.** Pages under test are untrusted, and their scripts run in the server's
   Chromium.
   - Every connection the browser makes goes through a proxy local to the run. The proxy refuses
-    loopback, private-network, link-local (cloud metadata) and other reserved addresses, unless
-    the host is listed exactly in `ALLOWED_TARGET_HOSTS`.
+    loopback, private-network, link-local (cloud metadata) and other reserved addresses, and any
+    port but 80 and 443, unless the host is listed exactly in `ALLOWED_TARGET_HOSTS` (`*` lists
+    no host exactly).
   - It resolves each host itself and connects to the address it checked, so a DNS answer that
     changes cannot redirect it.
   - Requests that a journey's own `setup` answers (the STEM-Accessibility mock) never leave the

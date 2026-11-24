@@ -206,6 +206,45 @@ describe("worker, with a fake run process", () => {
     assert.match(fake.run(run.id).error, /Refused: evil\.vercel\.app resolves to 10\.0\.0\.5/);
   });
 
+  describe('with ALLOWED_TARGET_HOSTS="*", a run inserted straight into the table is checked again', () => {
+    const anyConfig = configFor("*");
+    for (const [what, base, message] of [
+      ["a private address", "http://10.0.0.1/", /Refused: 10\.0\.0\.1 is a private or reserved address/],
+      ["the metadata address", "http://169.254.169.254/latest/", /Refused: 169\.254\.169\.254 is a private or reserved address/],
+      ["an IPv4-mapped loopback", "https://[::ffff:127.0.0.1]/", /Refused: .* is a private or reserved address/],
+      ["another port", "https://example.org:8443/", /Refused: Port 8443 is not allowed/],
+      ["a single-label host", "https://intranet/", /Refused: intranet is not a full host name/],
+    ]) {
+      it(`refuses ${what}`, async () => {
+        const run = queued({ base_url: base, journeys: [BASIC] });
+        const fake = fakeSupabase({ runs: [run] });
+        let ran = false;
+        await createWorker({ db: dbOf(fake), catalog, config: anyConfig, execute: async () => ((ran = true), executeNothing()), lookup, log: quiet }).tick();
+        assert.equal(fake.run(run.id).status, "failed");
+        assert.match(fake.run(run.id).error, message);
+        assert.equal(ran, false, "no run process was started");
+      });
+    }
+
+    it("refuses a public-looking host that resolves to a private address, before starting", async () => {
+      const run = queued({ base_url: "https://looks-public.example.org/", journeys: [BASIC] });
+      const fake = fakeSupabase({ runs: [run] });
+      let ran = false;
+      await createWorker({ db: dbOf(fake), catalog, config: anyConfig, execute: async () => ((ran = true), executeNothing()), lookup: async () => ["93.184.216.34", "192.168.1.20"], log: quiet }).tick();
+      assert.match(fake.run(run.id).error, /Refused: looks-public\.example\.org resolves to 192\.168\.1\.20/);
+      assert.equal(ran, false);
+    });
+
+    it("runs a public site, handing the run process the rule so every connection is checked", async () => {
+      const run = queued({ base_url: "https://example.org/", journeys: [BASIC] });
+      const fake = fakeSupabase({ runs: [run] });
+      let job;
+      await createWorker({ db: dbOf(fake), catalog, config: anyConfig, execute: async (j) => ((job = j), executeNothing()), lookup, log: quiet }).tick();
+      assert.equal(job.baseUrl, "https://example.org/");
+      assert.equal(job.allowedTargetHosts, "*");
+    });
+  });
+
   it("hands the run process only the checked job", async () => {
     const run = queued({ base_url: `https://${HOST}/x`, journeys: [BASIC, BASIC], modes: ["walker", "virtual"] });
     const fake = fakeSupabase({ runs: [run] });

@@ -30,7 +30,7 @@ describe("ALLOWED_TARGET_HOSTS parsing", () => {
     assert.equal(checkTargetUrl("https://good.vercel.app/", []).ok, false);
   });
 
-  for (const bad of ["*", "*.com", "https://example.org", "example.org/path", "user@example.org", "*.127.0.0.1", "*.0.0.1", "*.localhost", "ex*ample.org", "a.*.example.org", "example.org:0", "example.org:99999", "::1", "exa mple.org", "-bad-.example.org"]) {
+  for (const bad of ["*:443", "**", "*.*", "*.com", "https://example.org", "example.org/path", "user@example.org", "*.127.0.0.1", "*.0.0.1", "*.localhost", "ex*ample.org", "a.*.example.org", "example.org:0", "example.org:99999", "::1", "exa mple.org", "-bad-.example.org"]) {
     it(`refuses the rule "${bad}"`, () => assert.throws(() => parseAllowedHosts(bad), /ALLOWED_TARGET_HOSTS/));
   }
 });
@@ -132,7 +132,7 @@ describe("egress decisions", () => {
   it("allows public hosts and pins the checked address", async () => {
     assert.deepEqual(await decide("cdn.example.com", 443), { ok: true, address: "93.184.216.34" });
     assert.deepEqual(await decide("good.vercel.app", 443), { ok: true, address: "76.76.21.21" });
-    assert.deepEqual(await decide("8.8.8.8", 53), { ok: true, address: "8.8.8.8" });
+    assert.deepEqual(await decide("8.8.8.8", 443), { ok: true, address: "8.8.8.8" });
   });
   for (const [host, port, why] of [
     ["127.0.0.1", 5432, /private/],
@@ -147,6 +147,11 @@ describe("egress decisions", () => {
     ["v6only.example.com", 443, /resolves to ::1/],
     ["evil.vercel.app", 443, /resolves to 127\.0\.0\.1/],
     ["missing.example.com", 443, /could not resolve/],
+    // Hosts not listed exactly: ports 80 and 443 only, checked before any lookup.
+    ["8.8.8.8", 53, /port 53 is only allowed for hosts listed exactly/],
+    ["cdn.example.com", 22, /port 22 is only allowed for hosts listed exactly/],
+    ["good.vercel.app", 8443, /port 8443/],
+    ["missing.example.com", 25, /port 25/],
   ]) {
     it(`blocks ${host}:${port}`, async () => {
       const decision = await decide(host, port);
@@ -311,5 +316,172 @@ describe("egress proxy, when the other side misbehaves", () => {
 
   it("answers 400 to a CONNECT whose target is not a host and port", async () => {
     assert.match(await raw("CONNECT %%:443 HTTP/1.1\r\nHost: x\r\n\r\n"), /^HTTP\/1\.1 400/);
+  });
+});
+
+describe('ALLOWED_TARGET_HOSTS="*": any public site', () => {
+  const any = parseAllowedHosts("*");
+  const mixed = parseAllowedHosts("*, 127.0.0.1:4173");
+  const check = (url, rules = any) => checkTargetUrl(url, rules);
+
+  it("parses alone or with exact rules", () => {
+    assert.deepEqual(any.map((r) => [r.text, Boolean(r.any)]), [["*", true]]);
+    assert.deepEqual(mixed.map((r) => r.text), ["*", "127.0.0.1:4173"]);
+  });
+
+  for (const [url, normalized] of [
+    ["https://example.org/", "https://example.org/"],
+    ["http://example.org/page?x=1#top", "http://example.org/page?x=1"],
+    ["https://www.example.co.uk:443/", "https://www.example.co.uk/"],
+    ["http://example.org:80/", "http://example.org/"],
+    ["https://93.184.216.34/", "https://93.184.216.34/"],
+    ["https://[2606:4700:4700::1111]/", "https://[2606:4700:4700::1111]/"],
+  ]) {
+    it(`accepts ${url}`, () => assert.deepEqual(check(url), { ok: true, url: normalized }));
+  }
+
+  it("still trusts an exact rule listed with it, on its own port", () => {
+    assert.equal(check("http://127.0.0.1:4173/", mixed).ok, true);
+    assert.equal(check("http://127.0.0.1:4174/", mixed).ok, false);
+  });
+
+  for (const [url, why] of [
+    ["http://127.0.0.1/", /127\.0\.0\.1 is a private or reserved address/],
+    ["http://0x7f000001/", /127\.0\.0\.1 is a private or reserved address/],
+    ["https://[::1]/", /::1 is a private or reserved address/],
+    ["https://10.0.0.1/", /private or reserved/],
+    ["https://172.16.0.1/", /private or reserved/],
+    ["https://192.168.1.1/", /private or reserved/],
+    ["http://169.254.169.254/latest/meta-data/", /169\.254\.169\.254 is a private or reserved address/],
+    ["http://[fd00:ec2::254]/", /fd00:ec2::254 is a private or reserved address/],
+    ["https://100.64.0.1/", /private or reserved/],
+    ["https://224.0.0.1/", /private or reserved/],
+    ["https://0.0.0.0/", /private or reserved/],
+    ["https://[::]/", /private or reserved/],
+    ["https://[::ffff:127.0.0.1]/", /private or reserved/],
+    ["https://[fe80::1]/", /private or reserved/],
+    ["https://localhost/", /localhost is a local address/],
+    ["https://app.localhost/", /local address/],
+    ["https://intranet/", /intranet is not a full host name/],
+    ["https://example.org:8443/", /Port 8443 is not allowed; this server tests sites on ports 80 and 443 only/],
+    ["http://example.org:443/", /Port 443 is not allowed/],
+    ["https://user:secret@example.org/", /must not contain a user name or password/],
+    ["ftp://example.org/", /must start with https/],
+    ["https://example.org./", /must not end with a dot/],
+  ]) {
+    it(`refuses ${url}`, () => {
+      const result = check(url);
+      assert.equal(result.ok, false);
+      assert.match(result.reason, why);
+    });
+  }
+
+  describe("at every connection the browser makes", () => {
+    const dns = {
+      "public.example": ["93.184.216.34"],
+      "inside.example": ["10.1.2.3"],
+      "mixed.example": ["93.184.216.34", "192.168.0.1"],
+      "metadata.example": ["169.254.169.254"],
+      "mapped.example": ["::ffff:10.0.0.1"],
+      "loop6.example": ["::1"],
+    };
+    const lookup = async (host) => {
+      if (!dns[host]) throw Object.assign(new Error("not found"), { code: "ENOTFOUND" });
+      return dns[host];
+    };
+    const decide = (host, port, rules = any) => resolveEgress(host, port, rules, lookup);
+
+    it("resolves a public site and connects to the checked address, never trusting it as listed", async () => {
+      assert.deepEqual(await decide("public.example", 443), { ok: true, address: "93.184.216.34" });
+      assert.deepEqual(await decide("93.184.216.34", 80), { ok: true, address: "93.184.216.34" });
+    });
+
+    it("trusts only the exact rules listed with it", async () => {
+      assert.deepEqual(await decide("127.0.0.1", 4173, mixed), { ok: true, address: null });
+    });
+
+    for (const [host, port, why] of [
+      ["inside.example", 443, /resolves to 10\.1\.2\.3/],
+      ["mixed.example", 443, /resolves to 192\.168\.0\.1/],
+      ["metadata.example", 80, /resolves to 169\.254\.169\.254/],
+      ["mapped.example", 443, /resolves to ::ffff:10\.0\.0\.1/],
+      ["loop6.example", 443, /resolves to ::1/],
+      ["127.0.0.1", 443, /private/],
+      ["[::ffff:7f00:1]", 443, /private/],
+      ["localhost", 80, /local address/],
+      ["public.example", 22, /port 22/],
+      ["93.184.216.34", 8080, /port 8080/],
+      ["missing.example", 443, /could not resolve/],
+    ]) {
+      it(`blocks ${host}:${port}`, async () => {
+        const decision = await decide(host, port);
+        assert.equal(decision.ok, false);
+        assert.match(decision.reason, why);
+      });
+    }
+  });
+});
+
+describe('the egress proxy under "*"', () => {
+  let site;
+  let proxy;
+  const hits = [];
+  before(async () => {
+    // An allowed site (listed exactly, as a stand-in for a public one) that redirects inside.
+    site = await new Promise((done) => {
+      const server = createServer((req, res) => {
+        hits.push(req.url);
+        res.writeHead(302, { Location: "http://inside.example/secret" }).end();
+      });
+      server.listen(0, "127.0.0.1", () => done(server));
+    });
+    const dns = { "inside.example": ["127.0.0.1"], "metadata.example": ["169.254.169.254"], "public.example": ["93.184.216.34"] };
+    const lookup = async (host) => {
+      if (!dns[host]) throw Object.assign(new Error("not found"), { code: "ENOTFOUND" });
+      return dns[host];
+    };
+    proxy = await startEgressProxy({ rules: parseAllowedHosts(`*, 127.0.0.1:${site.address().port}`), lookup });
+  });
+  after(async () => {
+    await proxy.close();
+    site.close();
+  });
+
+  const viaProxy = (url) =>
+    new Promise((resolve, reject) => {
+      const req = request({ host: "127.0.0.1", port: Number(new URL(proxy.server).port), path: url, method: "GET", headers: { host: new URL(url).host } }, (res) => {
+        res.resume();
+        res.on("end", () => resolve({ status: res.statusCode, location: res.headers.location }));
+      });
+      req.on("error", reject);
+      req.end();
+    });
+  const tunnel = (authority) =>
+    new Promise((resolve, reject) => {
+      const req = request({ host: "127.0.0.1", port: Number(new URL(proxy.server).port), method: "CONNECT", path: authority });
+      req.on("connect", (res, socket) => {
+        socket.destroy();
+        resolve(res.statusCode);
+      });
+      req.on("error", reject);
+      req.end();
+    });
+
+  it("decides each connection on its own: a redirect to a host that resolves inside is refused", async () => {
+    const first = await viaProxy(`http://127.0.0.1:${site.address().port}/`);
+    assert.deepEqual(first, { status: 302, location: "http://inside.example/secret" });
+    assert.equal((await viaProxy(first.location)).status, 403);
+    assert.deepEqual(hits, ["/"], "the redirect target was never reached");
+    assert.ok(proxy.blocked.some((b) => b.startsWith("inside.example:80 ") && /resolves to 127\.0\.0\.1/.test(b)), proxy.blocked.join("\n"));
+  });
+
+  it("refuses tunnels to private, metadata and loopback addresses, and to other ports", async () => {
+    assert.equal(await tunnel("inside.example:443"), 403);
+    assert.equal(await tunnel("metadata.example:443"), 403);
+    assert.equal(await tunnel("169.254.169.254:443"), 403);
+    assert.equal(await tunnel("[::ffff:127.0.0.1]:443"), 403);
+    assert.equal(await tunnel("public.example:22"), 403);
+    assert.equal(await tunnel("93.184.216.34:8443"), 403);
+    assert.ok(proxy.blocked.some((b) => b.startsWith("public.example:22 ") && /port 22/.test(b)), proxy.blocked.join("\n"));
   });
 });
