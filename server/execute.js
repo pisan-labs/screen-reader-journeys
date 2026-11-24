@@ -36,6 +36,9 @@ export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs =
     let error = null;
     let settled = false;
     const child = fork(CHILD, [], {
+      // None of this server's node flags: under `npm run server:dev`, --env-file-if-exists=.env
+      // would otherwise load .env (WORKER_TOKEN) into the run's own environment.
+      execArgv: [],
       env: childEnv(process.env, runAs?.home ? { HOME: runAs.home } : {}),
       stdio: ["ignore", "inherit", "inherit", "ipc"],
       serialization: "json",
