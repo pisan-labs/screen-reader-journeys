@@ -152,6 +152,7 @@ describe("HTTP API", () => {
   let server;
   let base;
   const tokensSeen = [];
+  const progressNow = new Map();
 
   before(async () => {
     fake = fakeSupabase({ users: { "alice-token": ALICE, "bob-token": BOB } });
@@ -160,7 +161,7 @@ describe("HTTP API", () => {
       tokensSeen.push(token);
       return fake.asUser({ "alice-token": ALICE, "bob-token": BOB }[token].id);
     };
-    const handler = createHandler({ config, catalog, auth: fake.auth, userClient, version: "test", log: { error() {} } });
+    const handler = createHandler({ config, catalog, auth: fake.auth, userClient, version: "test", log: { error() {} }, progress: (id) => progressNow.get(id) ?? null });
     server = createServer(handler);
     await new Promise((done) => server.listen(0, "127.0.0.1", done));
     base = `http://127.0.0.1:${server.address().port}`;
@@ -255,6 +256,20 @@ describe("HTTP API", () => {
     assert.equal((await call("GET", `/runs/${run.id}`, { token: "bob-token" })).status, 404);
     assert.equal((await call("GET", `/runs/${run.id}`)).status, 401);
     assert.equal((await call("GET", "/runs/not-a-uuid", { token: "alice-token" })).status, 404);
+  });
+
+  it("GET /runs/:id/progress gives where your run is, and nothing of anybody else's", async () => {
+    const run = fake.tables.runs[0];
+    const where = { journey: HOME, mode: "walker", step: "press Tab", n: 4, index: 1, of: 2, done: 0, passed: 0, failed: 0, errored: 0, started_at: "2026-11-24T10:00:00.000Z", time_limit_s: 900 };
+    assert.deepEqual((await call("GET", `/runs/${run.id}/progress`, { token: "alice-token" })).body, { progress: null }, "not running here");
+    progressNow.set(run.id, where);
+    const mine = await call("GET", `/runs/${run.id}/progress`, { token: "alice-token" });
+    assert.equal(mine.status, 200);
+    assert.deepEqual(mine.body, { progress: where });
+    assert.equal((await call("GET", `/runs/${run.id}/progress`, { token: "bob-token" })).status, 404, "another person's run");
+    assert.equal((await call("GET", `/runs/${run.id}/progress`)).status, 401);
+    assert.equal((await call("GET", "/runs/not-a-uuid/progress", { token: "alice-token" })).status, 404);
+    progressNow.clear();
   });
 
   it("answers CORS preflights only for allowed origins", async () => {

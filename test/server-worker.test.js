@@ -338,6 +338,32 @@ describe("worker, with a fake run process", () => {
     assert.match(fake.run(run.id).summary.blocked_requests[0], /byte limit/);
   });
 
+  it("holds the progress of the run in progress, for its page, and forgets it when the run ends", async () => {
+    const run = queued({ base_url: `https://${HOST}/`, journeys: [BASIC], modes: ["walker", "virtual"] });
+    const fake = fakeSupabase({ runs: [run] });
+    let release;
+    let seen;
+    const execute = async (job, { onEvent }) => {
+      onEvent({ kind: "start", journey: BASIC, mode: "walker" });
+      onEvent({ kind: "step", journey: BASIC, mode: "walker", step: "press Tab", n: 2 });
+      onEvent({ kind: "result", journey: BASIC, mode: "walker", status: "fail" });
+      onEvent({ kind: "start", journey: BASIC, mode: "virtual" });
+      await new Promise((r) => (release = r));
+      return { outcome: "done", error: null, results: [summary(BASIC, "walker", "fail"), summary(BASIC, "virtual")], blocked: [] };
+    };
+    const worker = createWorker({ db: dbOf(fake), catalog, config, execute, lookup, log: quiet });
+    const ticking = worker.tick();
+    for (let i = 0; i < 100 && !release; i++) await new Promise((r) => setTimeout(r, 10));
+    seen = worker.progressOf(run.id);
+    assert.equal(worker.progressOf("some-other-run"), null);
+    release();
+    await ticking;
+    assert.deepEqual({ ...seen, started_at: typeof seen.started_at }, {
+      journey: BASIC, mode: "virtual", step: null, n: null, index: 2, of: 2, done: 1, passed: 0, failed: 1, errored: 0, started_at: "string", time_limit_s: 60,
+    });
+    assert.equal(worker.progressOf(run.id), null, "forgotten once the run has ended");
+  });
+
   it("hands the run process only the checked job", async () => {
     const run = queued({ base_url: `https://${HOST}/x`, journeys: [BASIC, BASIC], modes: ["walker", "virtual"] });
     const fake = fakeSupabase({ runs: [run] });
@@ -1125,8 +1151,9 @@ process.stdin.on("end", () => {
 `
       );
       const lines = [];
-      const outcome = await executeRun(job, { timeoutMs: 10000, child: file, log: { log: (m) => lines.push(m), error: (m) => lines.push(m) } });
-      return Object.assign(outcome, { lines });
+      const events = [];
+      const outcome = await executeRun(job, { timeoutMs: 10000, child: file, log: { log: (m) => lines.push(m), error: (m) => lines.push(m) }, onEvent: (e) => events.push(e) });
+      return Object.assign(outcome, { lines, events });
     } finally {
       await rm(folder, { recursive: true, force: true });
     }
@@ -1214,6 +1241,41 @@ process.stdin.on("end", () => {
     assert.equal(outcome.blocked.length, MAX_BLOCKED + 1);
     assert.deepEqual(outcome.blocked.slice(0, MAX_BLOCKED), [...batch(0), ...batch(100)], "the first different ones, each once");
     assert.deepEqual(outcome.blocked.filter((e) => e.startsWith("all connections")), [limit(100)]);
+  });
+
+  it("passes on where the run is: a journey and mode starting, its steps, each result", async () => {
+    const outcome = await probe([
+      { type: "progress", journey: good.journey, mode: "walker" },
+      { type: "progress", journey: good.journey, mode: "walker", step: "press Tab", n: 3 },
+      { type: "result", result: good },
+      { type: "progress", journey: good.journey, mode: "virtual" },
+      { type: "done" },
+    ]);
+    assert.equal(outcome.outcome, "done");
+    assert.deepEqual(outcome.events, [
+      { kind: "start", journey: good.journey, mode: "walker" },
+      { kind: "step", journey: good.journey, mode: "walker", step: "press Tab", n: 3 },
+      { kind: "result", journey: good.journey, mode: "walker", status: "pass" },
+      { kind: "start", journey: good.journey, mode: "virtual" },
+    ]);
+  });
+
+  for (const [what, message] of [
+    ["for a journey the job does not have", { type: "progress", journey: "targets/other.journey.js", mode: "walker" }],
+    ["for a mode the job does not have", { type: "progress", journey: good.journey, mode: "voiceover" }],
+    ["with a step that is too long", { type: "progress", journey: good.journey, mode: "walker", step: "s".repeat(201), n: 1 }],
+    ["with a step that is not text", { type: "progress", journey: good.journey, mode: "walker", step: { x: 1 }, n: 1 }],
+    ["with a step number that is not a count", { type: "progress", journey: good.journey, mode: "walker", step: "Tab", n: -1 }],
+  ]) {
+    it(`ends the run as an error on progress ${what}`, async () => {
+      const outcome = await probe([message, { type: "done" }]);
+      assert.deepEqual([outcome.outcome, outcome.error, outcome.events], ["error", "The run process sent a malformed message.", []]);
+    });
+  }
+
+  it("refuses progress for a journey and mode that has already finished", async () => {
+    const outcome = await probe([{ type: "result", result: good }, { type: "progress", journey: good.journey, mode: "walker" }]);
+    assert.equal(outcome.error, "The run process sent a malformed message.");
   });
 
   it("keeps only the fields of a result that the worker uses (R8.4)", async () => {

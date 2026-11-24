@@ -27,6 +27,9 @@ export function summarizeResult(result, path) {
   };
 }
 
+/** How often, at most, a run's progress reports its step. */
+export const PROGRESS_EVERY_MS = 1000;
+
 /**
  * Send the proxy's refusals not yet sent with a result, if any: at the end of a job (the byte
  * limit can trip as the proxy closes), and when the run is stopped (R9.3), so the run's summary
@@ -64,7 +67,15 @@ export async function runJob(job, send, { lookup, startProxy = startEgressProxy,
     for (const { path, file } of job.journeys) {
       const journey = await loadJourney(file);
       for (const mode of job.modes) {
-        const result = await runJourney(journey, { mode, baseUrl: job.baseUrl, launchOptions });
+        // Progress for the run's page: this journey and mode, then its steps, at most one a second.
+        send({ type: "progress", journey: path, mode });
+        let told = 0;
+        const onStep = (step) => {
+          if (Date.now() - told < PROGRESS_EVERY_MS) return;
+          told = Date.now();
+          send({ type: "progress", journey: path, mode, step: String(step.action).slice(0, 200), n: step.n });
+        };
+        const result = await runJourney(journey, { mode, baseUrl: job.baseUrl, launchOptions, onStep });
         results.push(result);
         await writeReports(results, job.outDir);
         send({ type: "result", result: summarizeResult(result, path), blocked: proxy.blocked.splice(0) });

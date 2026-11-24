@@ -39,6 +39,30 @@ export interface Catalog {
   modes: string[];
   allowed_hosts: string[];
 }
+/** Where a run in progress is (GET /runs/:id/progress), while the server runs it. */
+export interface Progress {
+  journey: string | null;
+  mode: string | null;
+  step: string | null;
+  n: number | null;
+  index: number;
+  of: number;
+  done: number;
+  passed: number;
+  failed: number;
+  errored: number;
+  started_at: string;
+  time_limit_s: number;
+}
+
+/** "1 min 20 s", "45 s", "15 min". */
+export function duration(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds));
+  const min = Math.floor(s / 60);
+  const rest = s % 60;
+  if (!min) return `${rest} s`;
+  return rest ? `${min} min ${rest} s` : `${min} min`;
+}
 export interface RunSummary {
   passed?: number;
   failed?: number;
@@ -607,13 +631,56 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
     return `The run finished: ${s.passed ?? 0} passed, ${s.failed ?? 0} failed, ${plural(s.errored ?? 0, 'error')}.`;
   };
 
+  /**
+   * The lines that say where a running run is. Only the first two (which journey and mode, and the
+   * results so far) are announced, when they change; the step and the clock are shown, not said.
+   */
+  function progressLines(p: Progress, list: Catalog | null, now: number) {
+    const which = p.journey && p.mode ? `${journeyName(list, p.journey)}, ${MODES[p.mode]?.[0] ?? p.mode}` : 'starting';
+    const elapsed = (now - Date.parse(p.started_at)) / 1000;
+    return {
+      running: `Running ${p.index} of ${p.of}: ${which}.`,
+      soFar: p.done ? `So far: ${p.passed} passed, ${p.failed} failed, ${plural(p.errored, 'error')}.` : null,
+      step: p.step ? `Step ${p.n ?? ''}: ${p.step}`.replace('Step : ', 'Step: ') : null,
+      clock: Number.isFinite(elapsed) ? `${duration(elapsed)} of ${duration(p.time_limit_s)}.` : null,
+    };
+  }
+
   async function renderRun(id: string, { focus = true } = {}) {
     const details = h('div', {}, h('p', {}, 'Loading the run…'));
     const heading = h('h1', { tabindex: '-1' }, 'Run');
-    show('Run', [h('p', {}, h('a', { href: '#/' }, 'Back to runs')), heading, details], { focus });
+    const progressBox = h('div', { id: 'progress', class: 'progress' });
+    show('Run', [h('p', {}, h('a', { href: '#/' }, 'Back to runs')), heading, progressBox, details], { focus });
     const mine = generation;
     const current = () => generation === mine;
     let shown: string | null = null;
+    let saidProgress: string | null = null;
+
+    /** Show, and say when it changes, where the run is; nothing once it is no longer running. */
+    async function showProgress(run: Run) {
+      let p: Progress | null = null;
+      if (run.status === 'running') {
+        p = await api<{ progress: Progress | null }>(`/runs/${encodeURIComponent(run.id)}/progress`)
+          .then((r) => r.progress)
+          .catch(() => null);
+      }
+      if (!current()) return;
+      if (!p) {
+        progressBox.replaceChildren();
+        return;
+      }
+      const list = await loadCatalog().catch(() => null);
+      const lines = progressLines(p, list, Date.now());
+      progressBox.replaceChildren(
+        h('h2', {}, 'Progress'),
+        ...[lines.running, lines.soFar, lines.step, lines.clock].filter((t): t is string => Boolean(t)).map((t) => h('p', {}, t)),
+      );
+      const said = [lines.running, lines.soFar].filter(Boolean).join(' ');
+      if (said !== saidProgress) {
+        announce(said);
+        saidProgress = said;
+      }
+    }
 
     async function refresh() {
       if (!current()) return;
@@ -653,9 +720,11 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
         collect(runDetails(run, list, available));
         details.replaceChildren(...nodes);
         if (hadFocus) byId('status-heading')?.focus();
-        if (shown !== null) announce(run.status === 'done' || run.status === 'failed' ? finishedText(run) : `The run is ${STATUS[run.status]?.[0].toLowerCase() ?? run.status}.`);
+        // A running run says where it is instead (showProgress), so only the other changes are said here.
+        if (shown !== null && run.status !== 'running') announce(run.status === 'done' || run.status === 'failed' ? finishedText(run) : `The run is ${STATUS[run.status]?.[0].toLowerCase() ?? run.status}.`);
         shown = key;
       }
+      await showProgress(run);
       if (run.status === 'queued' || run.status === 'running') pollTimer = setTimeout(refresh, pollMs);
     }
     await refresh();

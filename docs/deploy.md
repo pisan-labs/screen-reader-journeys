@@ -8,7 +8,7 @@ some journeys, and read the transcripts when the run finishes. It follows claude
 ```
   Browser ──────────────► Netlify: web/ (static dashboard)
      │                        │
-     │ sign in, list runs,    │ GET /journeys, POST /runs, GET /runs/:id
+     │ sign in, list runs,    │ GET /journeys, POST /runs, GET /runs/:id(/progress)
      │ read reports           ▼
      │                    Render: server/ (Docker: HTTP API + worker + Chromium)
      ▼                        │  the API acts as the signed-in person (row level security);
@@ -176,6 +176,13 @@ turned off, because every build costs credits. Docs-only commits carry `[skip ne
 | `VITE_SUPABASE_URL` | `https://auth.hintwise.org` | `netlify.toml` |
 | `VITE_SUPABASE_ANON_KEY` | the public anon key. The build refuses a service-role key | `netlify.toml` |
 | `VITE_API_URL` | the Render service's address, without a trailing slash | the site's environment variables |
+| `VITE_SITE_URL` | `https://screen-reader-journeys.hintwise.org`, the dashboard's one address | `netlify.toml` |
+
+- **One address.** Opened anywhere else (over http, under the netlify.app name, at a deploy's own
+  address or a Deploy Preview), the page first moves to `VITE_SITE_URL`, keeping its path, query
+  and hash, and sign-in always returns there (`web/src/canonical.ts`). Otherwise Supabase would
+  refuse the return address and fall back to the shared project's `site_url`, another app. Without
+  `VITE_SITE_URL` (local work) the page stays where it is.
 
 - **The build:** `tsc` and `vite build`.
 - **The Content-Security-Policy** goes in `_headers`. It allows exactly the Supabase URL and the
@@ -291,6 +298,15 @@ straight into the table.
 where you can.
 
 ## Operations
+
+- **A run's progress.** While a run is running, its page shows which journey and mode it is on
+  ("Running 2 of 4: …"), the results so far, the step, and the time against the time limit. The
+  worker holds this in memory, from the run process's checked messages (a "progress" message
+  when a journey and mode starts, and its step at most once a second), and the API serves it to
+  the run's owner only (`GET /runs/:id/progress`, which reads the run through the person's own
+  client first). Nothing is stored: a server that is not running the run answers
+  `{ "progress": null }`. The page's status line says the journey and the results when they
+  change, not the step or the clock.
 
 - **Updates.**
   - Netlify builds on every push to `main`. Render deploys as its service is set up.

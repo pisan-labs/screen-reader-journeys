@@ -14,6 +14,9 @@
 [build.environment]
   NODE_VERSION = "22"
   VITE_SUPABASE_URL = "https://auth.hintwise.org"
+  # The dashboard's one address: opened anywhere else (http, netlify.app, a deploy's own address),
+  # it moves there first, and sign-in returns there (web/src/canonical.ts).
+  VITE_SITE_URL = "https://screen-reader-journeys.hintwise.org"
   VITE_SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFya3R4bHJseWNlZmZ5b3pkd2hxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY4ODEwMTAsImV4cCI6MjA5MjQ1NzAxMH0.Vuku-irT3kAHZYibK23q6dpyOEqV_Eg5zB78I3dyshE"
 
 # One address for the app: the netlify.app name sends people to hintwise.org.

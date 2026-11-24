@@ -45,7 +45,9 @@ const anon = createClient(config.supabaseUrl, config.supabaseAnonKey, clientOpti
 const userClient = (token) =>
   createClient(config.supabaseUrl, config.supabaseAnonKey, { ...clientOptions, global: { fetch, headers: { Authorization: `Bearer ${token}` } } });
 
-const server = createServer(createHandler({ config, catalog, auth: anon.auth, userClient, version }));
+// The worker runs in this process, so the API can show a run's progress from it.
+let worker = null;
+const server = createServer(createHandler({ config, catalog, auth: anon.auth, userClient, version, progress: (id) => worker?.progressOf(id) ?? null }));
 server.requestTimeout = 30000;
 server.headersTimeout = 15000;
 server.listen(config.port, "0.0.0.0", () => {
@@ -54,7 +56,7 @@ server.listen(config.port, "0.0.0.0", () => {
   console.log(`allowed origins: ${config.allowedOrigins.join(", ") || "none (ALLOWED_ORIGINS is empty)"}`);
 });
 
-const worker = createWorker({ db: workerDb(anon, config.workerToken), catalog, config });
+worker = createWorker({ db: workerDb(anon, config.workerToken), catalog, config });
 worker.start();
 
 let stopping = false;
