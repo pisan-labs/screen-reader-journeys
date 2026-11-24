@@ -77,3 +77,7 @@ Append-only journal, oldest first. Earlier history: `git log` and `docs/handoff.
 2026-11-24 [decision] PManager (T1) on #17 round 1: R7.1 option A; total 40 a day; 100 MB per run; the dashboard says the page is opened by a browser on our server.
 
 2026-11-24 [code] #17 round 2: the run process has no IPC; job on stdin, messages as JSON lines on fd 3, at most 1 MB each; the dashboard sentence; "byte limit" in blocked.
+
+2026-11-24 [decision] PManager (T1): every wildcard rule needs the sandbox gate too (R8.3); round 3 is #17's last round.
+
+2026-11-24 [code] #17 round 3: the byte limit counts the browser's sockets (headers, uploads, tunnels), 500 host names a run, 256 KB messages, wildcards gated.

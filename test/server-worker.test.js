@@ -1236,6 +1236,14 @@ process.stdin.on("end", () => {
     assert.equal(outcome.results[0].error.length, 90_000);
   });
 
+  it("takes messages until the pipes close, not only until the process exits (R8.5)", { timeout: 10000 }, async () => {
+    // The process exits at once; what it started writes the result and "done" 300 ms later.
+    const later = `setTimeout(() => { const o = require("node:fs").createWriteStream("", { fd: 3 }); o.write(JSON.stringify({ type: "result", result: ${JSON.stringify(good)} }) + "\\n"); o.end(JSON.stringify({ type: "done" }) + "\\n"); }, 300)`;
+    const outcome = await runSource(`spawn(process.execPath, ["-e", ${JSON.stringify(later)}], { stdio: ["ignore", "ignore", "ignore", "inherit"] });\nprocess.stdin.resume();\nprocess.stdin.on("end", () => process.exit(0));`);
+    assert.equal(outcome.outcome, "done", String(outcome.error));
+    assert.deepEqual(outcome.results, [good]);
+  });
+
   it("allows 1000 log lines a run, stdout and stderr together (R8.6)", async () => {
     const outcome = await runSource('for (let i = 0; i < 600; i++) { process.stdout.write("o\\n"); process.stderr.write("e\\n"); }\nprocess.stdin.resume();\nprocess.stdin.on("end", () => out.end(JSON.stringify({ type: "done" }) + "\\n", () => setTimeout(() => process.exit(0), 50)));');
     const relayed = outcome.lines.filter((m) => m.startsWith("run process:"));

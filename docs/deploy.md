@@ -120,8 +120,8 @@ shared with other apps). It needs a service of its own, built from this reposito
 - **Defaults.** `RUN_TIMEOUT_SECONDS` (900) and `POLL_INTERVAL_SECONDS` (5) are set in
   `render.yaml`, and `SUPABASE_TIMEOUT_SECONDS` defaults to 30.
 - **Set for you.** Render sets `PORT`, and the Docker image sets `RUN_AS_UID` and `RUN_AS_GID`.
-- **`CHROMIUM_SANDBOX`:** leave it unset with an allow-list; set it to `true` with `*`, which
-  needs it (see [Security](#security)).
+- **`CHROMIUM_SANDBOX`:** leave it unset with exact hosts only; set it to `true` with `*` or a
+  wildcard rule, which need it (see [Security](#security)).
 - **Plan: free** (the owner, 23 November 2026). It costs nothing, and has 0.1 CPU and 512 MB.
   Keep one instance, since the worker runs one run at a time. A paid plan needs the owner's yes.
   - **It sleeps** after 15 minutes without requests. A queued run waits until the next request
@@ -266,11 +266,11 @@ browser makes (redirects and subresources included):
   search path;
 - ports other than 80 and 443.
 
-`*` never makes a host "listed exactly": everything it admits is checked like that. It also needs
-Chromium's sandbox (`CHROMIUM_SANDBOX=true`, checked when the worker starts; see Security).
-A person may also start at most 10 runs a day (UTC, `0002_daily_cap.sql`), everyone together 40,
-and a person may have at most 3 waiting or running. A run may move at most 100 MB through the
-proxy.
+`*` never makes a host "listed exactly": everything it admits is checked like that. It, and any
+wildcard rule, also needs Chromium's sandbox (`CHROMIUM_SANDBOX=true`, checked when the worker
+starts; see Security). A person may also start at most 10 runs a day (UTC, `0002_daily_cap.sql`),
+everyone together 40, and a person may have at most 3 waiting or running. A run may move at most
+100 MB through the proxy, and look up at most 500 host names.
 
 The server also refuses:
 
@@ -286,8 +286,9 @@ The server also refuses:
 It checks a run again before running it, because a signed-in person can also insert a queued run
 straight into the table.
 
-`*.vercel.app` admits any Vercel deployment, including other people's. Prefer exact hosts, or a
-domain only you control, where you can.
+`*.vercel.app` admits any Vercel deployment, including other people's, so any wildcard rule, like
+`*`, needs Chromium's sandbox (see Security). Prefer exact hosts, or a domain only you control,
+where you can.
 
 ## Operations
 
@@ -303,8 +304,11 @@ domain only you control, where you can.
 - **Limits.**
   - Three runs waiting or running per person (`limit_active_runs`); ten started per UTC day per
     person, and forty in all (`limit_daily_runs`, 0002). Each answers 429 with the reason.
-  - Per run, through the network guard: at most 100 MB, both directions together. Then every
-    connection is closed and new ones are refused, and the run's blocked requests say so.
+  - Per run, through the network guard: at most 100 MB, both directions together, counted on
+    the browser's own connections to it (request lines, headers, bodies, uploads and tunnels
+    alike; checked every 50 ms, so a run may pass it by what moves in that time). Then every
+    connection is closed and new ones are refused; the run's blocked requests say so first, and
+    the server logs one line. A run may also look up at most 500 host names, each once.
   - Per run: one result for each of the run's journeys and modes (a unique constraint), and at
     most 200 report files and 20 MiB of reports, of at most 2 MiB each.
   - A file is left out if it is a link or another non-file, is over 2 MiB, has a name the
@@ -401,23 +405,29 @@ domain only you control, where you can.
     browser, so mocks still work.
   - QUIC is turned off, and WebRTC may not use UDP, since neither would go through the proxy.
   - What the run process sends back is checked: results only for the run's own journeys and
-    modes, of the right shape; nothing after it is done, has failed or has sent something
-    malformed (which ends the run as an error). It has no IPC channel: the job goes in on stdin,
-    and its messages come back on a pipe, one JSON line each, at most about 1 MB a line, so it
-    cannot make the server hold more. Its own output reaches the log quoted, one line at a time,
-    at most 2000 characters a line and 1000 lines a run.
+    modes, of the right shape, and only the fields the worker uses are kept; nothing is read
+    after it is done or has failed, or after something malformed (which ends the run as an
+    error). Results already on their way when its time is up are still taken until it has
+    ended. It has no IPC channel: the job goes in on stdin, and its messages come back on a
+    pipe, one JSON line each, at most 256 KB a line, so it cannot make the server hold more than
+    that at once, plus at most one small result for each journey and mode. Its own output
+    reaches the log quoted, one line at a time, at most 2000 characters a line and 1000 lines a
+    run, stdout and stderr together.
 - **Chromium's sandbox** (`CHROMIUM_SANDBOX`) is off by default: it needs user namespaces,
   which many container hosts do not allow.
   - **Without it**, a Chromium exploit in a tested page runs as `runner` inside the container. It
     cannot read the server's environment, but the network guard is a process like any other, not
     a wall: the exploit can use the container's network without it, Render's private network
-    included. With an allow-list, that risk is limited to the sites listed, so keep the list short
-    and trusted (exact hosts).
-  - **With `*`, the sandbox is required.** Any signed-in person may then send the browser to any
-    page, so with `*` the worker starts only if `CHROMIUM_SANDBOX=true` and a sandboxed Chromium
-    starts here, as `runner` (`server/sandbox-probe.js`, tried once at start-up). Otherwise the
-    log says `not starting the worker: ALLOWED_TARGET_HOSTS="*" needs Chromium's sandbox ...`
-    and the server exits. Whether Render's host allows it is known only by trying.
+    included. With exact hosts only, that risk is limited to the sites listed, so keep the list
+    short and trusted.
+  - **With `*` or a wildcard rule, the sandbox is required.** Anyone signed in may then send the
+    browser to any page (`*`), or to any page under a shared domain (`*.vercel.app`, where anyone
+    may host one). So the worker then starts only if `CHROMIUM_SANDBOX=true` and a sandboxed
+    Chromium starts here, as `runner` (`server/sandbox-probe.js`, tried once at start-up).
+    Otherwise the log says `not starting the worker: ALLOWED_TARGET_HOSTS with "*" or a wildcard
+    rule needs Chromium's sandbox ...` and the server exits. A run is also refused, and the run
+    process refuses its job, without the sandbox. Whether Render's host allows it is known only by
+    trying.
   - **In every mode**, keep Playwright and the image up to date: within a week of a Chromium
     security release.
 - **Errors** shown to people are short. Database details go only to Render's log.
