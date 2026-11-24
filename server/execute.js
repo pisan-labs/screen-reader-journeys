@@ -25,17 +25,18 @@ export function childEnv(env = process.env, overrides = {}) {
  * server must then run as root, as it does in the Docker image.
  *
  * @param {object} job
- * @param {{ timeoutMs?: number, signal?: AbortSignal, killAfterMs?: number, runAs?: { uid: number, gid: number, home?: string } | null }} [options]
+ * @param {{ timeoutMs?: number, signal?: AbortSignal, killAfterMs?: number, runAs?: { uid: number, gid: number, home?: string } | null, child?: string }} [options]
+ *   `child`: the program to run instead of run-child.js (the tests give their own)
  * @returns {Promise<{ outcome: string, error: string | null, results: any[], blocked: string[] }>}
  */
-export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs = null } = {}) {
+export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs = null, child: program = CHILD } = {}) {
   return new Promise((resolve) => {
     const results = [];
     const blocked = [];
     let outcome = null;
     let error = null;
     let settled = false;
-    const child = fork(CHILD, [], {
+    const child = fork(program, [], {
       // None of this server's node flags: under `npm run server:dev`, --env-file-if-exists=.env
       // would otherwise load .env (WORKER_TOKEN) into the run's own environment.
       execArgv: [],
