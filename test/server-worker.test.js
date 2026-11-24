@@ -1189,6 +1189,15 @@ process.stdin.on("end", () => {
     }
   };
 
+  it("takes the refusals sent on their own at the end of a job or at a stop (R9.3)", async () => {
+    const limit = "all connections (byte limit: the run moved its 100 MB through the network guard)";
+    const outcome = await probe([{ type: "result", result: good, blocked: ["a.example:443 (private)"] }, { type: "blocked", blocked: [limit] }, { type: "done" }]);
+    assert.equal(outcome.outcome, "done");
+    assert.deepEqual(outcome.blocked, ["a.example:443 (private)", limit]);
+    const bad = await probe([{ type: "blocked", blocked: {} }, { type: "done" }]);
+    assert.equal(bad.error, "The run process sent a malformed message.");
+  });
+
   it("keeps only the fields of a result that the worker uses (R8.4)", async () => {
     const outcome = await probe([{ type: "result", result: { ...good, x: Array.from({ length: 1000 }, () => ({})) } }, { type: "done" }]);
     assert.equal(outcome.outcome, "done");
@@ -1304,6 +1313,27 @@ describe("run-child.js, with \"*\" or a wildcard (R8.2)", () => {
     for (const hosts of ["*", "*.vercel.app"]) {
       await assert.rejects(runJob({ allowedTargetHosts: hosts, chromiumSandbox: false, journeys: [], modes: [] }, () => {}), /needs Chromium's sandbox/, hosts);
     }
+  });
+});
+
+describe("run-child.js sends the refusals left at the end (R9.3)", () => {
+  it("sends what the proxy refused after the last result, the byte limit tripping as it closes included", async () => {
+    const { runJob } = await import("../server/run-child.js");
+    const limit = "all connections (byte limit: the run moved its 100 MB through the network guard)";
+    const proxy = { server: "http://127.0.0.1:1", blocked: ["late.example:443 (private)"], close: async () => proxy.blocked.unshift(limit) };
+    const sent = [];
+    let told = null;
+    await runJob({ allowedTargetHosts: "", journeys: [], modes: [] }, (m) => sent.push(m), { startProxy: async () => proxy, onProxy: (p) => (told = p) });
+    assert.deepEqual(sent, [{ type: "blocked", blocked: [limit, "late.example:443 (private)"] }]);
+    assert.equal(told, proxy, "the main block can send what is left at a stop");
+  });
+
+  it("sends nothing when nothing is left, or no proxy has started", async () => {
+    const { sendLeftover } = await import("../server/run-child.js");
+    const sent = [];
+    sendLeftover(null, (m) => sent.push(m));
+    sendLeftover({ blocked: [] }, (m) => sent.push(m));
+    assert.deepEqual(sent, []);
   });
 });
 

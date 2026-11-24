@@ -307,8 +307,9 @@ where you can.
   - Per run, through the network guard: at most 100 MB, both directions together, counted on
     the browser's own connections to it (request lines, headers, bodies, uploads and tunnels
     alike; checked every 50 ms, so a run may pass it by what moves in that time). Then every
-    connection is closed and new ones are refused; the run's blocked requests say so first, and
-    the server logs one line. A run may also look up at most 500 host names, each once.
+    connection is closed and new ones are refused; the run's blocked requests say so first, also
+    when the run ends early (a timeout, a stop, or a journey that fails), and the server logs one
+    line. A run may also look up at most 500 host names, each once.
   - Per run: one result for each of the run's journeys and modes (a unique constraint), and at
     most 200 report files and 20 MiB of reports, of at most 2 MiB each.
   - A file is left out if it is a link or another non-file, is over 2 MiB, has a name the

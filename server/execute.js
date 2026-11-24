@@ -243,6 +243,11 @@ export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs =
         const r = message.result;
         results.push({ journey: r.journey, name: r.name, mode: r.mode, status: r.status, error: r.error, checks_total: r.checks_total, checks_passed: r.checks_passed, errors: r.errors, warnings: r.warnings, report_base: r.report_base });
         blocked.push(...refused);
+      } else if (message?.type === "blocked") {
+        // The proxy's refusals left at the end of a job or at a stop (run-child.js, sendLeftover).
+        const refused = blockedOf(message.blocked);
+        if (!refused) return malformed();
+        blocked.push(...refused);
       } else if (message?.type === "done") {
         close();
         outcome ??= "done";

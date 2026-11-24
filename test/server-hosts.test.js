@@ -509,6 +509,7 @@ describe("the egress proxy connects to the checked address, and limits a run's b
           return res.end();
         }
         if (req.url === "/headers") return res.writeHead(204, { "x-big": "h".repeat(14_000) }).end();
+        if (req.url === "/200k") return res.end("k".repeat(200_000));
         if (req.url === "/upload") {
           let got = 0;
           req.on("data", (c) => (got += c.length));
@@ -609,6 +610,30 @@ describe("the egress proxy connects to the checked address, and limits a run's b
       assert.equal(outcome.status, 200);
       assert.ok(outcome.back < 6000, `the echo was cut at the limit (${outcome.back} bytes came back)`);
       assert.match(limitEntry(proxy), /byte limit/);
+    } finally {
+      await proxy.close();
+    }
+  });
+
+  it("counts a connection's bytes when it closes, so short connections one after another reach the limit (R9.1)", async () => {
+    // Each download is quick and on its own connection: most close before the 50 ms count.
+    const proxy = await startEgressProxy({ rules: parseAllowedHosts(`127.0.0.1:${site.address().port}`), maxBytes: 1_000_000 });
+    try {
+      let passed = 0;
+      for (let i = 0; i < 30; i++) {
+        const status = await new Promise((resolve) => {
+          const req = request(
+            { host: "127.0.0.1", port: Number(new URL(proxy.server).port), path: `http://127.0.0.1:${site.address().port}/200k`, agent: false, headers: { connection: "close" } },
+            (r) => (r.resume(), r.on("end", () => resolve(r.statusCode)), r.on("error", () => resolve(0)))
+          );
+          req.on("error", () => resolve(0));
+          req.end();
+        });
+        if (status === 200) passed += 1;
+      }
+      // 200 KB each against 1 MB: the sixth or so reaches it, and none passes after.
+      assert.ok(passed >= 4 && passed <= 7, `${passed} of 30 passed`);
+      assert.match(proxy.blocked[0] ?? "", /byte limit/);
     } finally {
       await proxy.close();
     }
