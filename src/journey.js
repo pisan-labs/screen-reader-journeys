@@ -115,8 +115,9 @@ class Session {
    * Activate the focused control the way a keyboard user would: Space for checkboxes, radios and
    * switches, Enter otherwise. With `expectDownload` (true, a string or a RegExp for the file
    * name), waits for the download and checks its name.
+   *
+   * @param {{ expectDownload?: boolean | string | RegExp }} [options]
    */
-  /** @param {{ expectDownload?: boolean | string | RegExp }} [options] */
   async activate({ expectDownload } = {}) {
     const role = this.driver.lastFocus?.role;
     const key = ["checkbox", "radio", "switch"].includes(role) ? "Space" : "Enter";
@@ -202,8 +203,7 @@ class Session {
  * Run one journey in one mode. `baseUrl` is the site under test, e.g. a pull request's preview.
  * `launchOptions` go to Playwright's browser launch (the hosted server uses them for its network
  * guard proxy).
- */
-/**
+ *
  * @param {any} journey
  * @param {{ mode: string, baseUrl: string, headed?: boolean, launchOptions?: { args?: string[], [key: string]: any } }} options
  */
