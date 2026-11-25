@@ -176,13 +176,20 @@ turned off, because every build costs credits. Docs-only commits carry `[skip ne
 | `VITE_SUPABASE_URL` | `https://auth.hintwise.org` | `netlify.toml` |
 | `VITE_SUPABASE_ANON_KEY` | the public anon key. The build refuses a service-role key | `netlify.toml` |
 | `VITE_API_URL` | the Render service's address, without a trailing slash | the site's environment variables |
-| `VITE_SITE_URL` | `https://screen-reader-journeys.hintwise.org`, the dashboard's one address | `netlify.toml` |
+| `VITE_SITE_URL` | `https://screen-reader-journeys.hintwise.org`, the dashboard's one address; production builds only | `netlify.toml`, `[context.production.environment]` |
 
-- **One address.** Opened anywhere else (over http, under the netlify.app name, at a deploy's own
-  address or a Deploy Preview), the page first moves to `VITE_SITE_URL`, keeping its path, query
-  and hash, and sign-in always returns there (`web/src/canonical.ts`). Otherwise Supabase would
-  refuse the return address and fall back to the shared project's `site_url`, another app. Without
-  `VITE_SITE_URL` (local work) the page stays where it is.
+- **One address.** Opened anywhere else (over http, under the netlify.app name, or at a deploy's
+  own address), the page first moves to `VITE_SITE_URL`, keeping its path, query and hash, and
+  sign-in always returns there (`web/src/canonical.ts`). Otherwise Supabase would refuse the return
+  address and fall back to the shared project's `site_url`, another app. The move is made by
+  `dist/site.js`, which the build writes and puts first in the page, before the analytics script,
+  so a moved visit counts once; `src/main.ts` moves the page too if `site.js` did not run.
+  - A production build without it, or with anything but an https address on `hintwise.org`,
+    fails.
+  - A Deploy Preview or branch deploy (both off) is built without it, so it shows its own code
+    where it is; sign-in cannot return to such an address in any case.
+  - Leave it empty for local work (`.env.example`), or a local page would move to the live site.
+    The dashboard test sets it empty, whatever the shell says.
 
 - **The build:** `tsc` and `vite build`.
 - **The Content-Security-Policy** goes in `_headers`. It allows exactly the Supabase URL and the
@@ -229,7 +236,11 @@ Then in the dashboard:
     under 85% of lines, branches or functions). Node counts only files that ran, so
     `test/server-index.test.js` starts `server/index.js` as a real process, and it is measured
     too. CI runs coverage as an ordinary user and then, as root, the root-only tests of
-    `test/server-reports.test.js` and `test/server-worker.test.js`, which coverage does not count;
+    `test/server-reports.test.js` and `test/server-worker.test.js`, which coverage does not count.
+    Run as root, `test/server-index.test.js` starts the server as `nobody`, and skips those tests,
+    saying why, when `nobody` cannot read the checkout (one under `/root`, say). Run one suite at
+    a time on a machine: the root-only tests stop every process of the run's user, so two suites
+    at once (two worktrees, or a reviewer's mutations beside a coverage run) fail each other's;
   - in `web/`, for the dashboard: `npm run lint`, `npm run typecheck`, `npm run coverage` (at
     least 85%, under jsdom with fakes) and `npm run build`.
 - **`npm run test:sql`** applies the migrations twice to a throwaway local PostgreSQL, on a stub of
@@ -302,11 +313,17 @@ where you can.
 - **A run's progress.** While a run is running, its page shows which journey and mode it is on
   ("Running 2 of 4: …"), the results so far, the step, and the time against the time limit. The
   worker holds this in memory, from the run process's checked messages (a "progress" message
-  when a journey and mode starts, and its step at most once a second), and the API serves it to
-  the run's owner only (`GET /runs/:id/progress`, which reads the run through the person's own
-  client first). Nothing is stored: a server that is not running the run answers
-  `{ "progress": null }`. The page's status line says the journey and the results when they
-  change, not the step or the clock.
+  when a journey and mode starts, and its step at most once a second; the worker passes on at
+  most one step each half second, resetting at each journey and mode, and a run that sends more
+  than 5000 progress messages, or for a run longer than 40 minutes twice what it could send, ends
+  as malformed), and the API serves it to the run's owner only (`GET /runs/:id/progress`, which
+  reads the run through the person's own client first). Between a result and the next start it
+  names no journey ("starting"), and while the reports are saved it says so, keeping the results.
+  The time is the server's own (`elapsed_s`), so the visitor's clock does not matter. Nothing is
+  stored: a server that is not running the run answers `{ "progress": null }`. The page's status
+  line says the journey and the results when they change, not the step or the clock; opening
+  the page of a running run says them at once. When a run starts and there is no progress to
+  say yet (or the request fails), it says "The run is running." instead.
 
 - **Updates.**
   - Netlify builds on every push to `main`. Render deploys as its service is set up.
@@ -334,10 +351,14 @@ where you can.
     the browser's own connections to it (request lines, headers, bodies, uploads and tunnels
     alike; checked every 50 ms, so a run may pass it by what moves in that time). Then every
     connection is closed and new ones are refused; the run's blocked requests say so first, also
-    when the run ends early (a timeout, or a journey that fails), and the server logs one line.
-    A run stopped because the server is shutting down (a deploy) is put back in the queue and
-    starts again, so its summary is the new run's. A run may also look up at most 500 host names,
-    each once. Its blocked requests keep at most 200 different entries, plus the byte limit's.
+    when the run ends early (a timeout, or an error that ends the job, such as a journey that
+    cannot be loaded), and the server logs one line. A run stopped because the server is
+    shutting down (a deploy) is put back in the queue and starts again, so its summary is the new
+    run's. After a stop, no new journey or mode starts, and a result the stop cut short is not
+    counted. A run may also look up at most 500 host names, each counted once. A lookup that fails
+    for a reason that may pass (a busy resolver) is tried again, at most 4 times in all; one that
+    finds no such host is kept, so a page that keeps asking for a dead host costs one lookup.
+    Each refusal entry is cut to 2000 characters in the middle, so its reason shows.
   - Per run: one result for each of the run's journeys and modes (a unique constraint), and at
     most 200 report files and 20 MiB of reports, of at most 2 MiB each.
   - A file is left out if it is a link or another non-file, is over 2 MiB, has a name the
@@ -355,7 +376,12 @@ where you can.
 
   Deleting a run, or the account, deletes its results and reports at once.
 - **Logs.** Render's log shows each run starting and ending. The network guard's refusals are
-  stored with the run (`summary.blocked_requests`) and shown on the run page.
+  stored with the run (`summary.blocked_requests`) and shown on the run page. The server keeps
+  at most 200 different ones a run, plus the byte limit's; the summary shows the first 50, the
+  byte limit's first, each cut to 300 characters and each once as cut, and when it shows fewer
+  than there were, it counts them (`summary.blocked_count`, "And N more." on the page). When the
+  server left some out past its 200, that count is a floor (`summary.blocked_more`, "And at least
+  N more.").
 
 ## Security
 

@@ -33,26 +33,40 @@ let out;
 let site;
 let csp;
 
-before(async () => {
-  out = await mkdtemp(join(tmpdir(), "srj-web-"));
+/**
+ * Build the dashboard into `dir`, with `env` over the test's values. VITE_SITE_URL is empty unless
+ * given, whatever the shell, a web/.env or `netlify dev` says, or the page would move to the live
+ * site (R18.1-3). NETLIFY and CONTEXT are cleared too: these are local builds.
+ */
+async function build(dir, env = {}) {
   const web = fileURLToPath(new URL("../web/", import.meta.url));
-  await promisify(execFile)(process.execPath, [join(web, "node_modules/vite/bin/vite.js"), "build", "--outDir", out, "--emptyOutDir", "--logLevel", "error"], {
+  await promisify(execFile)(process.execPath, [join(web, "node_modules/vite/bin/vite.js"), "build", "--outDir", dir, "--emptyOutDir", "--logLevel", "error"], {
     cwd: web,
-    env: { ...process.env, VITE_SUPABASE_URL: SUPABASE, VITE_SUPABASE_ANON_KEY: "anon-key", VITE_API_URL: API },
+    env: { ...process.env, NETLIFY: "", CONTEXT: "", VITE_SUPABASE_URL: SUPABASE, VITE_SUPABASE_ANON_KEY: "anon-key", VITE_API_URL: API, VITE_SITE_URL: "", ...env },
   });
-  csp = /Content-Security-Policy: (.*)/.exec(await readFile(join(out, "_headers"), "utf8"))[1];
+  return /Content-Security-Policy: (.*)/.exec(await readFile(join(dir, "_headers"), "utf8"))[1];
+}
+
+/** A server for a build, with its policy; `root()` and `policy()` are read on each request. */
+async function serveBuild(root, policy) {
   const types = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css", ".txt": "text/plain; charset=utf-8" };
   const server = createServer(async (req, res) => {
     const name = new URL(req.url, "http://x").pathname.slice(1) || "index.html";
     if (!/^(assets\/)?[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*\.(html|js|css|txt)$/.test(name)) return res.writeHead(404).end();
     try {
-      res.writeHead(200, { "Content-Type": types[extname(name)], "Content-Security-Policy": csp }).end(await readFile(join(out, name)));
+      res.writeHead(200, { "Content-Type": types[extname(name)], "Content-Security-Policy": policy() }).end(await readFile(join(root(), name)));
     } catch {
       res.writeHead(404).end();
     }
   });
   await new Promise((done) => server.listen(0, "127.0.0.1", done));
-  site = { url: `http://127.0.0.1:${server.address().port}`, close: () => server.close() };
+  return { url: `http://127.0.0.1:${server.address().port}`, close: () => server.close() };
+}
+
+before(async () => {
+  out = await mkdtemp(join(tmpdir(), "srj-web-"));
+  csp = await build(out);
+  site = await serveBuild(() => out, () => csp);
 });
 after(async () => {
   site?.close();
@@ -239,4 +253,53 @@ describe("dashboard on a phone", () => {
       await browser.close();
     }
   });
+});
+
+describe("dashboard at its one address (R18.1-2)", () => {
+  let dir;
+  let policy;
+  let elsewhere;
+  let home;
+  before(async () => {
+    // Two servers of one build: the build names the second as the one address.
+    dir = await mkdtemp(join(tmpdir(), "srj-web-site-"));
+    home = await serveBuild(() => dir, () => policy);
+    elsewhere = await serveBuild(() => dir, () => policy);
+    policy = await build(dir, { VITE_SITE_URL: home.url });
+  });
+  after(async () => {
+    home?.close();
+    elsewhere?.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  // Each way alone: site.js with the page's own scripts blocked where it was opened, then
+  // src/main.ts with site.js blocked.
+  for (const [how, blocked] of [["by site.js alone", "/assets/**"], ["by src/main.ts alone", "/site.js"]]) {
+    it(`moves a page opened elsewhere there, ${how}, before sign-in shows, and sign-in returns there`, async () => {
+      const browser = await chromium.launch();
+      try {
+        const page = await browser.newPage();
+        await fakeBackend(page, { signedIn: false });
+        const shown = [];
+        await page.exposeFunction("srjSignInShown", (origin) => shown.push(origin));
+        await page.addInitScript(() => {
+          const look = () => [...document.querySelectorAll("button")].some((b) => /Sign in with Google/.test(b.textContent ?? "")) && window.srjSignInShown(location.origin);
+          new MutationObserver(look).observe(document, { childList: true, subtree: true });
+        });
+        await page.route(`${elsewhere.url}${blocked}`, (route) => route.abort());
+        await page.goto(`${elsewhere.url}/index.html?x=1#/runs`);
+        await page.waitForURL(`${home.url}/index.html?x=1#/runs`);
+        const authorize = new Promise((resolve) =>
+          page.route(`${SUPABASE}/auth/v1/authorize**`, (route) => (resolve(new URL(route.request().url())), route.fulfill({ status: 200, contentType: "text/html", body: "<p>Google</p>" })))
+        );
+        await page.getByRole("button", { name: "Sign in with Google" }).click();
+        assert.equal((await authorize).searchParams.get("redirect_to"), `${home.url}/`);
+        assert.ok(shown.includes(home.url), "sign-in shows at the one address");
+        assert.ok(!shown.includes(elsewhere.url), "and never where the page was first opened");
+      } finally {
+        await browser.close();
+      }
+    });
+  }
 });

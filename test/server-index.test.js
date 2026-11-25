@@ -3,7 +3,7 @@
 // stops on SIGTERM.
 
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -60,6 +60,14 @@ async function goodEnv(extra = {}) {
 // them as an ordinary user (nobody) instead, which needs neither.
 const ordinary = root ? { uid: 65534, gid: 65534 } : null;
 
+/**
+ * Whether nobody can read this checkout, which those tests need. One under /root (0700) is out of
+ * its reach; CI runs them as an ordinary user, so it is not affected (R5.2). A server that cannot
+ * write root's coverage folder only goes unmeasured.
+ */
+const asNobody = (code) => spawnSync(process.execPath, ["-e", code], { ...ordinary, stdio: "ignore", env: {} }).status === 0;
+const unreachable = root && !asNobody(`require("fs").accessSync(${JSON.stringify(INDEX)}, require("fs").constants.R_OK)`) && "nobody cannot read this checkout (one under /root, say); CI runs these as an ordinary user";
+
 describe("server/index.js", () => {
   it("refuses to start with a bad configuration, listing every problem", async () => {
     const { code, output } = await start({}).exited;
@@ -77,7 +85,7 @@ describe("server/index.js", () => {
   });
 
   for (const signal of /** @type {const} */ (["SIGTERM", "SIGINT"])) {
-    it(`listens, answers /health, and stops on ${signal}`, async () => {
+    it(`listens, answers /health, and stops on ${signal}`, { skip: unreachable }, async () => {
       const env = await goodEnv();
       const server = start(env, ordinary);
       try {

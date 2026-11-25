@@ -34,13 +34,27 @@ export function isResult(r) {
     isText(r.report_base, 500)
   );
 }
-/** The proxy's refusals: strings, "host:port (reason)", each cut here to a bounded length. */
 /**
- * The most different refusals kept for one run, however many the run process sends: the summary
- * shows 50. One byte-limit entry is kept besides, so that the others never crowd it out.
+ * The most different refusals kept for one run, however many the run process sends. One
+ * byte-limit entry is kept besides, so that the others never crowd it out. The proxy sends at
+ * most 50 at a time (egress-proxy.js, MAX_BLOCKED_PER_SEND), and a run's summary shows 50.
  */
 export const MAX_BLOCKED = 200;
 
+/**
+ * The fewest progress messages one run may send before it is malformed. run-child.js sends one as
+ * each journey and mode starts and at most one step a second, so a 15-minute run sends fewer
+ * than 2000 (R19.1-2). A longer run may send more: see progressLimit (R21.1-3).
+ */
+export const MAX_PROGRESS = 5000;
+
+/** For a run of `timeoutMs` with `pairs` journeys and modes: twice what run-child can send. */
+export const progressLimit = (timeoutMs, pairs) => Math.max(MAX_PROGRESS, 2 * (Math.ceil((timeoutMs || 0) / 1000) + 2 * pairs));
+
+/** Steps that come sooner than this after the last one passed on are not passed on (R19.1-2). */
+export const STEP_EVERY_MS = 500;
+
+/** The proxy's refusals: strings, "host:port (reason)", each cut here to a bounded length. */
 const blockedOf = (list) => (Array.isArray(list) && list.length <= 1000 && list.every((s) => typeof s === "string") ? list.map((s) => s.slice(0, 2000)) : null);
 
 /**
@@ -177,26 +191,32 @@ export function childEnv(env = process.env, overrides = {}) {
  * server must then run as root, as it does in the Docker image.
  *
  * @param {object} job
- * @param {{ timeoutMs?: number, signal?: AbortSignal, killAfterMs?: number, runAs?: { uid: number, gid: number, home?: string } | null, child?: string, log?: Pick<Console, "log" | "error">, onEvent?: (event: { kind: string, journey: string, mode: string, step?: string, n?: number, status?: string }) => void }} [options]
+ * @param {{ timeoutMs?: number, signal?: AbortSignal, killAfterMs?: number, runAs?: { uid: number, gid: number, home?: string } | null, child?: string, log?: Pick<Console, "log" | "error">, onEvent?: (event: { kind: string, journey: string, mode: string, step?: string, n?: number, status?: string }) => void, now?: () => number }} [options]
  *   `child`: the program to run instead of run-child.js (the tests give their own); `log`: where
  *   the run process's own output goes, quoted and bounded; `onEvent`: told, as the run goes, of
  *   { kind: "start", journey, mode }, { kind: "step", journey, mode, step, n } and
- *   { kind: "result", journey, mode, status }, each checked first (the run's page shows them)
+ *   { kind: "result", journey, mode, status }, each checked first (the run's page shows them);
+ *   `now`: a monotonic clock in milliseconds (the tests give their own)
  * @returns {Promise<{ outcome: string, error: string | null, results: any[], blocked: string[] }>}
  */
-export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs = null, child: program = CHILD, log = console, onEvent = () => {} } = {}) {
+export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs = null, child: program = CHILD, log = console, onEvent = () => {}, now = () => performance.now() } = {}) {
   return new Promise((resolve) => {
     const results = [];
     const blocked = [];
     // Each refusal once, at most MAX_BLOCKED of them and one byte-limit entry (R20.1-1).
+    // `blockedMore` says some were left out past the cap, so the count is a floor (R21.1-4).
     const seen = new Set();
     let byteLimit = false;
+    let blockedMore = false;
     const keep = (/** @type {string[]} */ refused) => {
       for (const entry of refused) {
         if (entry.startsWith(BYTE_LIMIT_ENTRY)) {
           if (byteLimit) continue;
           byteLimit = true;
-        } else if (seen.size >= MAX_BLOCKED || seen.has(entry)) {
+        } else if (seen.has(entry)) {
+          continue;
+        } else if (seen.size >= MAX_BLOCKED) {
+          blockedMore = true;
           continue;
         } else {
           seen.add(entry);
@@ -244,9 +264,11 @@ export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs =
     const settle = () => {
       if (settled) return;
       settled = true;
+      // Nothing more is read once the run is settled: its results are the worker's now (R9.5).
+      close();
       clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
-      resolve({ outcome, error, results, blocked });
+      resolve({ outcome, error, results, blocked, ...(blockedMore ? { blockedMore } : {}) });
     };
 
     const malformed = () => {
@@ -257,6 +279,8 @@ export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs =
     // One result for each journey and mode of the job, and no other.
     const expected = new Set((job?.journeys ?? []).flatMap((j) => (job?.modes ?? []).map((mode) => `${j.path}\n${mode}`)));
     const taken = new Set();
+    let progressed = 0;
+    let stepAt = -Infinity;
     const onMessage = (/** @type {any} */ message) => {
       if (closed) return;
       if (message?.type === "result") {
@@ -272,11 +296,21 @@ export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs =
         onEvent({ kind: "result", journey: r.journey, mode: r.mode, status: r.status });
       } else if (message?.type === "progress") {
         // Where the run is: for one of the job's journeys and modes, not yet finished; a step is
-        // short text and a count. Nothing else is passed on.
+        // short text and a count. Nothing else is passed on, steps at most one each STEP_EVERY_MS,
+        // and a run that sends more than MAX_PROGRESS of these is malformed (R19.1-1, R19.1-2).
+        if (++progressed > progressLimit(timeoutMs, expected.size)) return malformed();
+        if (!isText(message.journey, 500) || !isText(message.mode, 50)) return malformed();
         const key = `${message.journey}\n${message.mode}`;
         if (!expected.has(key) || taken.has(key)) return malformed();
-        if (message.step === undefined) return onEvent({ kind: "start", journey: message.journey, mode: message.mode });
+        if (message.step === undefined) {
+          // Each journey and mode's first step is passed on, however soon it comes (R21.1-2).
+          stepAt = -Infinity;
+          return onEvent({ kind: "start", journey: message.journey, mode: message.mode });
+        }
         if (!isText(message.step, 200) || !isCount(message.n)) return malformed();
+        const at = now();
+        if (at - stepAt < STEP_EVERY_MS) return;
+        stepAt = at;
         onEvent({ kind: "step", journey: message.journey, mode: message.mode, step: message.step.toWellFormed(), n: message.n });
       } else if (message?.type === "blocked") {
         // The proxy's refusals left at the end of a job or at a stop (run-child.js, sendLeftover).
