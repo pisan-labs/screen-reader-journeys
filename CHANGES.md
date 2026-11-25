@@ -95,4 +95,6 @@ Append-only journal, oldest first. Earlier history: `git log` and `docs/handoff.
 
 2026-11-24 [code] Follow-ups for 26 Nov (#15): stop path, progress and summary bounds, one address checked at build, test gaps; R5.2, R6.3, R9.2-R9.7, R18.1, R19.1, R20.2.
 
+2026-11-24 [code] Pages open on their load event (120 s), then wait up to 15 s for network quiet, noted if it never comes; a page that does not load skips its run's others, each reported.
+
 2026-11-24 [code] #21 round 1: a dead host costs one lookup, each name counted once (R21.1-1); step clock per mode, progress cap by run length, blocked count as a floor, entries cut.

@@ -1,7 +1,7 @@
 // Runs one journey in one mode and records what was heard at each step.
 
 import { pathToFileURL } from "node:url";
-import { chromium, webkit } from "playwright";
+import { chromium, errors, webkit } from "playwright";
 import { DRIVERS, settle } from "./drivers.js";
 import { installRecorder } from "./recorder.js";
 import { checkFocus, describeMatcher, matchesFocus, speakFocus } from "./focus.js";
@@ -203,18 +203,26 @@ class Session {
 }
 
 /**
- * Run one journey in one mode. `baseUrl` is the site under test, e.g. a pull request's preview.
- * `launchOptions` go to Playwright's browser launch (the hosted server uses them for its network
- * guard proxy).
- *
- * @param {any} journey
- * @param {{ mode: string, baseUrl: string, headed?: boolean, launchOptions?: { args?: string[], [key: string]: any }, onStep?: ((step: any) => void) | null }} options
+ * How long a page may take to fire its load event. A heavy page on a slow host needs far more
+ * than Playwright's 30 s: https://www.washington.edu/ fired it after 5 s in the build container,
+ * and after 42 to 50 s there at 0.1 CPU (Render's free plan), so this leaves about 2.4 times that.
+ * It counts against the run's RUN_TIMEOUT_SECONDS, like everything else a journey does.
  */
-export async function runJourney(journey, { mode, baseUrl, headed = false, launchOptions = {}, onStep = null }) {
-  const Driver = DRIVERS[mode];
-  if (!Driver) throw new Error(`Unknown mode "${mode}". Modes: ${Object.keys(DRIVERS).join(", ")}`);
-  const url = new URL(journey.start, baseUrl).href;
-  const result = {
+export const LOAD_TIMEOUT_MS = 120_000;
+
+/**
+ * After load, how long to wait, at most, for the network to go quiet (500 ms with no request
+ * open). A page with a request that never ends (an analytics beacon, a long poll, a stream)
+ * never goes quiet; it is tested all the same once this has passed, and the transcript says the
+ * page may not have finished loading. 15 s lets content that comes from a slow or sleeping API
+ * arrive first (a sleeping Render service took 12.6 s to answer), at the cost of 15 s per
+ * journey and mode on a page that never goes quiet.
+ */
+export const IDLE_WAIT_MS = 15_000;
+
+/** The result of a journey and mode before it runs (runJourney), or one that is not run (`skipped`). */
+function newResult(journey, Driver, mode, url) {
+  return {
     journey: journey.name,
     description: journey.description ?? "",
     file: journey.file,
@@ -229,6 +237,34 @@ export async function runJourney(journey, { mode, baseUrl, headed = false, launc
     pageErrors: [],
     toolErrors: [],
   };
+}
+
+/** The page a journey opens first, on `baseUrl`. */
+export const startUrl = (journey, baseUrl) => new URL(journey.start, baseUrl).href;
+
+/**
+ * The result of a journey and mode that is not run, and why (run-child.js: its page did not load
+ * in an earlier journey). It has every field a run one has, so it gets a report too.
+ */
+export function skippedResult(journey, { mode, baseUrl }, why) {
+  const Driver = DRIVERS[mode];
+  return { ...newResult(journey, Driver, mode, startUrl(journey, baseUrl)), status: "error", error: why };
+}
+
+/**
+ * Run one journey in one mode. `baseUrl` is the site under test, e.g. a pull request's preview.
+ * `launchOptions` go to Playwright's browser launch (the hosted server uses them for its network
+ * guard proxy). `loadTimeoutMs` and `idleWaitMs` (LOAD_TIMEOUT_MS, IDLE_WAIT_MS) bound the opening
+ * of the page.
+ *
+ * @param {any} journey
+ * @param {{ mode: string, baseUrl: string, headed?: boolean, launchOptions?: { args?: string[], [key: string]: any }, onStep?: ((step: any) => void) | null, loadTimeoutMs?: number, idleWaitMs?: number }} options
+ */
+export async function runJourney(journey, { mode, baseUrl, headed = false, launchOptions = {}, onStep = null, loadTimeoutMs = LOAD_TIMEOUT_MS, idleWaitMs = IDLE_WAIT_MS }) {
+  const Driver = DRIVERS[mode];
+  if (!Driver) throw new Error(`Unknown mode "${mode}". Modes: ${Object.keys(DRIVERS).join(", ")}`);
+  const url = startUrl(journey, baseUrl);
+  const result = newResult(journey, Driver, mode, url);
   // A real screen reader may need to run before the browser starts (Orca), so the driver exists
   // first and gets the page once it is open.
   const driver = new Driver(null);
@@ -257,12 +293,36 @@ export async function runJourney(journey, { mode, baseUrl, headed = false, launc
       list.push(String(error).split("\n")[0]);
     });
     if (journey.setup) await journey.setup(page);
-    await page.goto(url, { waitUntil: "networkidle", timeout: 30000 });
+    const session = new Session(page, driver, result, onStep);
+    // The load event, then a moment of network quiet if it comes. Waiting for quiet alone failed
+    // every page that keeps a request open, such as https://www.washington.edu/ (an ad
+    // conversion request that never ends). If it does not come, the transcript says so: the page
+    // may still have been fetching its content (R22.1-1). Only the wait's own timeout is
+    // passed over; anything else (the page or browser closing) fails the journey here.
+    try {
+      await page.goto(url, { waitUntil: "load", timeout: loadTimeoutMs });
+    } catch (error) {
+      // The page itself did not load: run-child.js runs no more journeys that open it (R22.2-2).
+      if (error instanceof errors.TimeoutError) result.notLoaded = true;
+      throw error;
+    }
+    const quiet = await page.waitForLoadState("networkidle", { timeout: idleWaitMs }).then(
+      () => true,
+      (error) => {
+        if (error instanceof errors.TimeoutError) return false;
+        throw error;
+      }
+    );
+    if (!quiet) {
+      // Kept on the result too, so the journey's report and summary.md say it at the top.
+      result.stillLoading = `the network was still busy ${+(idleWaitMs / 1000).toFixed(1)} s after the page loaded: the page may still have been loading, and the walk may be incomplete`;
+      session.note(result.stillLoading);
+    }
     if (journey.ready) await page.locator(journey.ready).first().waitFor({ timeout: 20000 });
     await settle(page, 300);
     driver.page = page;
     await driver.start();
-    await journey.run(new Session(page, driver, result, onStep));
+    await journey.run(session);
   } catch (error) {
     if (!(error instanceof StopJourney)) {
       result.status = "error";

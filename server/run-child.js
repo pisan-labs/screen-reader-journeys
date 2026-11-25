@@ -5,7 +5,7 @@
 
 import { createWriteStream } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { loadJourney, runJourney } from "../src/journey.js";
+import { loadJourney, runJourney, skippedResult, startUrl } from "../src/journey.js";
 import { slug, writeReports } from "../src/report.js";
 import { startEgressProxy } from "./egress-proxy.js";
 import { needsSandbox, parseAllowedHosts } from "./hosts.js";
@@ -63,6 +63,11 @@ export function sendLeftover(proxy, send) {
  * mode starts, and a result that ends after it is not sent or saved: the stop made it, closing
  * the browser under it (R9.2). Its refusals still go out, with what is left at the end.
  *
+ * Once a journey's page has not loaded in time (runJourney's `notLoaded`), the run's other
+ * journeys and modes that open that same page are not run, so a site that never loads does not
+ * hold the one worker for the whole run timeout (R22.1-2, R22.2-3). Each gets a full result and a
+ * report that says why (R22.2-1).
+ *
  * @param {any} job
  * @param {(message: object) => void} send
  * @param {{ lookup?: (host: string) => Promise<string[]>, startProxy?: typeof startEgressProxy, onProxy?: (proxy: any) => void, stopped?: () => boolean, load?: typeof loadJourney, run?: typeof runJourney, write?: typeof writeReports, progressEveryMs?: number }} [options]
@@ -82,12 +87,22 @@ export async function runJob(job, send, { lookup, startProxy = startEgressProxy,
     args: ["--disable-quic", "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"],
   };
   const results = [];
+  /** Start pages that did not load, and why the journeys that open them are not run. */
+  const unloaded = new Map();
   try {
     for (const { path, file } of job.journeys) {
       if (stopped()) break;
       const journey = await load(file);
       for (const mode of job.modes) {
         if (stopped()) break;
+        const why = unloaded.size ? unloaded.get(startUrl(journey, job.baseUrl)) : undefined;
+        if (why) {
+          const skipped = skippedResult(journey, { mode, baseUrl: job.baseUrl }, why);
+          results.push(skipped);
+          await write(results, job.outDir);
+          send({ type: "result", result: summarizeResult(skipped, path), blocked: proxy.blocked.splice(0) });
+          continue;
+        }
         // Progress for the run's page: this journey and mode, then its steps, at most one each
         // `progressEveryMs`, and the latest one at the end of that time, so the step shown is
         // never stale (R19.1-7). Nothing once the journey has returned.
@@ -119,6 +134,7 @@ export async function runJob(job, send, { lookup, startProxy = startEgressProxy,
           clearTimeout(timer);
         }
         if (stopped()) break;
+        if (result.notLoaded) unloaded.set(result.url, `Not run: ${result.url} did not load in an earlier journey (${result.error})`);
         results.push(result);
         await write(results, job.outDir);
         send({ type: "result", result: summarizeResult(result, path), blocked: proxy.blocked.splice(0) });

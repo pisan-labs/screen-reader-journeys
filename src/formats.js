@@ -107,6 +107,7 @@ export function renderJourneyHtml(r) {
 ${r.description ? `<p>${escapeHtml(r.description)}</p>` : ""}
 <dl>
 <dt>Result</dt><dd>${statusBadge(r.status)}${r.error ? ` (${escapeHtml(r.error)})` : ""}</dd>
+${r.stillLoading ? `<dt>Note</dt><dd>${escapeHtml(r.stillLoading)}.</dd>` : ""}
 <dt>Mode</dt><dd>${escapeHtml(r.modeLabel)}${r.browser ? `, ${escapeHtml(r.browser)}` : ""}</dd>
 <dt>Page</dt><dd><a href="${escapeHtml(r.url)}">${escapeHtml(r.url)}</a></dd>
 <dt>Checks</dt><dd>${r.expectations.length - c.failed} of ${r.expectations.length} passed</dd>
@@ -137,6 +138,7 @@ export function renderSummaryHtml(results) {
     `<h1>Screen reader journeys</h1>
 ${results[0] ? `<p>Site: ${escapeHtml(new URL(results[0].url).origin)}</p>` : ""}
 <div class="table-wrap"><table><caption>Results by journey and mode</caption><thead><tr><th scope="col">Journey</th><th scope="col">Mode</th><th scope="col">Result</th><th scope="col">Checks passed</th><th scope="col">Errors</th><th scope="col">Warnings</th></tr></thead><tbody>${rows}</tbody></table></div>
+${results.some((r) => r.stillLoading) ? `<h2>Notes</h2><ul>${results.filter((r) => r.stillLoading).map((r) => `<li>${escapeHtml(r.journey)}, ${escapeHtml(r.mode)}: ${escapeHtml(r.stillLoading)}.</li>`).join("")}</ul>` : ""}
 ${hasComparison(results) ? '<p><a href="compare.html">Compare the modes side by side, step by step</a>.</p>' : ""}
 <p class="note">Findings are automatic and can be wrong; the transcripts are for a person to read. None of this replaces testing with a real screen reader and with people who use one.</p>`
   );
