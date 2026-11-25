@@ -787,6 +787,9 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
       session = next;
       if (first) {
         first = false;
+        // Listening before the first view has finished: a slow first page (a catalog or a run
+        // still loading) must not keep the person from leaving it.
+        win.addEventListener('hashchange', () => void route());
         void Promise.resolve(route({ focus: false })).then(resolve);
         return;
       }
@@ -794,5 +797,4 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
       if (changed) setTimeout(() => void route(), 0);
     });
   });
-  win.addEventListener('hashchange', () => void route());
 }

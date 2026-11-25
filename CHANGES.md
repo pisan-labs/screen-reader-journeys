@@ -100,3 +100,5 @@ Append-only journal, oldest first. Earlier history: `git log` and `docs/handoff.
 2026-11-24 [code] #21 round 1: a dead host costs one lookup, each name counted once (R21.1-1); step clock per mode, progress cap by run length, blocked count as a floor, entries cut.
 
 2026-11-25 [code] The run page shows each errored result's reason and a "still loading" note (summary.result_notes, no schema change); summary.md lists reasons.
+
+2026-11-25 [code] The dashboard listens for page changes from its first view, so a slow first page can be left.

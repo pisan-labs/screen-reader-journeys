@@ -709,6 +709,22 @@ describe('progress while a run is going (the owner: "The run is running." says t
     expect(seen.filter((t) => t.includes('Home page: Tab order'))).toEqual([]);
   });
 
+  it('lets the person leave a first page that is still loading', async () => {
+    let release = () => {};
+    const wait = new Promise((resolve) => (release = () => resolve(undefined)));
+    const catalog: Answer[] = [{ status: 200, body: CATALOG, wait }, { status: 200, body: CATALOG }];
+    const ui = setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': catalog, [`GET /runs/${RUN_ID}`]: { status: 200, body: { run: run() } } } });
+    await until(() => catalog.length === 1, 'the held catalog request');
+    // The address changes with no event of its own, so only this one can be heard: it comes
+    // while the first page is still loading.
+    window.history.replaceState(null, '', '#/');
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    release();
+    await ui;
+    await until(() => view().textContent?.includes('Start a run') ?? false, 'the runs page');
+    expect(view().querySelector('h1')?.textContent).not.toMatch(/^Run on/);
+  });
+
   it('says the progress again after it went away (a requeued run starting again) (R19.1-8)', async () => {
     const ui = setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': { status: 200, body: CATALOG }, [`GET /runs/${RUN_ID}`]: running, [`GET /runs/${RUN_ID}/progress`]: [
       ...Array.from({ length: 20 }, () => ({ status: 200, body: { progress: progress() } })),
