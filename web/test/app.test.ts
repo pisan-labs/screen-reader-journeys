@@ -390,6 +390,14 @@ describe('the dashboard', () => {
     expect(view().textContent).toMatch(/And at least 200 more\./);
   });
 
+  it('says "And more." when the count left after the cut is no more than is shown (R21.2-1)', async () => {
+    const summary = { passed: 1, files: ['summary.md'], blocked_requests: ['10.0.0.1:80 (private)'], blocked_count: 1, blocked_more: true };
+    await setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': { status: 200, body: CATALOG }, [`GET /runs/${RUN_ID}`]: { status: 200, body: { run: run({ summary }) } } } });
+    await until(() => view().textContent?.includes('Blocked requests') ?? false, 'the run');
+    expect(view().textContent).toMatch(/And more\./);
+    expect(view().textContent).not.toMatch(/And at least 0 more/);
+  });
+
   it('fetches a report only when asked, and saves it as a download, never as a page', async () => {
     const created: Blob[] = [];
     (URL.createObjectURL as unknown as ReturnType<typeof vi.fn>).mockImplementation((blob: Blob) => {
@@ -669,6 +677,15 @@ describe('progress while a run is going (the owner: "The run is running." says t
     // The result comes 20 polls after the start, well after its announcement has landed (50 ms).
     await until(() => requests.filter((r) => r.path === `/runs/${RUN_ID}`).length >= 45, 'polls past the result');
     expect(seen).toEqual(['The run is running.']);
+  });
+
+  it('keeps what the progress box shows when a request fails (R21.2-2)', async () => {
+    const said = { status: 200, body: { progress: progress() } };
+    const ui = setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': { status: 200, body: CATALOG }, [`GET /runs/${RUN_ID}`]: running, [`GET /runs/${RUN_ID}/progress`]: [said, { status: 502, body: { error: 'down' } }, { status: 502, body: { error: 'down' } }] } });
+    const { requests } = await ui;
+    await until(() => box().includes('Running 2 of 4'), 'the progress');
+    await until(() => requests.filter((r) => r.path.endsWith('/progress')).length >= 4, 'polls past the failures');
+    expect(box()).toMatch(/Running 2 of 4/);
   });
 
   it('does not say the progress again after a failed request (R21.1-5)', async () => {

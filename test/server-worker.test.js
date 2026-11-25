@@ -1242,7 +1242,7 @@ describe("the run process's output is checked before it is used (R6.2)", () => {
    * stdout, then sends `messages` on fd 3 as JSON lines (or `raw` text instead), and exits.
    * Resolves to executeRun's outcome, and the lines it logged.
    */
-  const probe = async (messages, { job = JOB, output = "", raw = null, now = undefined } = {}) => {
+  const probe = async (messages, { job = JOB, output = "", raw = null, now = undefined, timeoutMs = 10000 } = {}) => {
     const folder = await mkdtemp(join(tmpdir(), "srj-probe-"));
     try {
       const file = join(folder, "probe.mjs");
@@ -1261,7 +1261,7 @@ process.stdin.on("end", () => {
       );
       const lines = [];
       const events = [];
-      const outcome = await executeRun(job, { timeoutMs: 10000, child: file, log: { log: (m) => lines.push(m), error: (m) => lines.push(m) }, onEvent: (e) => events.push(e), ...(now ? { now } : {}) });
+      const outcome = await executeRun(job, { timeoutMs, child: file, log: { log: (m) => lines.push(m), error: (m) => lines.push(m) }, onEvent: (e) => events.push(e), ...(now ? { now } : {}) });
       return Object.assign(outcome, { lines, events });
     } finally {
       await rm(folder, { recursive: true, force: true });
@@ -1399,6 +1399,20 @@ process.stdin.on("end", () => {
     ];
     const outcome = await probe(messages, { now: () => times.shift() ?? 10_000 });
     assert.deepEqual(outcome.events.filter((e) => e.kind === "step").map((e) => e.step), ["w1", "v1"]);
+  });
+
+  it("lets a long run send more than MAX_PROGRESS progress messages (R21.2-2)", async () => {
+    const start = { type: "progress", journey: good.journey, mode: "walker" };
+    const outcome = await probe([...Array.from({ length: MAX_PROGRESS + 1 }, () => start), { type: "done" }], { timeoutMs: 10_000_000 });
+    assert.equal(outcome.outcome, "done");
+    assert.equal(outcome.error, null);
+  });
+
+  it("does not lift the step limit for a start repeated for the same journey and mode (R21.2-3)", async () => {
+    const times = [0, 200];
+    const start = { type: "progress", journey: good.journey, mode: "walker" };
+    const outcome = await probe([start, { ...start, step: "s1", n: 1 }, start, { ...start, step: "s2", n: 2 }, { type: "done" }], { now: () => times.shift() ?? 10_000 });
+    assert.deepEqual(outcome.events.filter((e) => e.kind === "step").map((e) => e.step), ["s1"]);
   });
 
   it("allows a longer run more progress messages (R21.1-3)", async () => {
@@ -1634,6 +1648,22 @@ describe("run-child.js, when a journey's page does not load (R22.1-2, R22.2)", (
     } finally {
       await rm(out, { recursive: true, force: true });
     }
+  });
+
+  it("saves the reports of journeys it did not run, a skipped one last included (R22.F-1)", async () => {
+    // Basic's page does not load and Hang, which opens the same page, comes last: only the skip
+    // itself can save Hang's report.
+    const { runJob } = await import("../server/run-child.js");
+    const saves = [];
+    let runs = 0;
+    const lastJob = { allowedTargetHosts: "", baseUrl: BASE, journeys: [BASIC, HANG].map((path) => ({ path, file: join(REPO_ROOT, path) })), modes: ["walker"], outDir: "unused" };
+    await runJob(lastJob, () => {}, {
+      startProxy: async () => stubProxy(),
+      write: async (results) => saves.push(results.map((r) => [r.journey, r.error])),
+      run: async (journey, { mode, baseUrl }) => ((runs += 1), resultOf(journey, mode, new URL(journey.start, baseUrl).href, failed)),
+    });
+    assert.equal(runs, 1);
+    assert.deepEqual(saves.at(-1), [["Basic test page", failed.error], ["Hanging journey", why]]);
   });
 
   it("goes on after a timeout that is not the opening load, even one with the same words (R22.2-2)", async () => {

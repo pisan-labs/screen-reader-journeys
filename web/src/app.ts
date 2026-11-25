@@ -637,7 +637,9 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
             h('h2', {}, 'Blocked requests'),
             h('p', {}, "The server's network guard stopped the page from reaching these addresses. A journey that needs one may have failed because of it."),
             h('ul', {}, blocked.map((b) => h('li', { class: 'url' }, b))),
-            moreBlocked || run.summary?.blocked_more ? h('p', {}, `And ${run.summary?.blocked_more ? 'at least ' : ''}${moreBlocked} more.`) : null,
+            moreBlocked || run.summary?.blocked_more
+              ? h('p', {}, run.summary?.blocked_more ? (moreBlocked ? `And at least ${moreBlocked} more.` : 'And more.') : `And ${moreBlocked} more.`)
+              : null,
           ]
         : null,
       waiting ? null : [h('h2', {}, 'Delete'), h('p', {}, deleteButton(run))],

@@ -763,6 +763,22 @@ describe("the egress proxy connects to the checked address, and limits a run's b
     }
   });
 
+  it("still tries a name it has tried before once the budget is full (R21.2-2)", async () => {
+    const asked = [];
+    const lookup = async (host) => {
+      asked.push(host);
+      if (asked.length === 1) throw failing("EAI_AGAIN", host);
+      return ["10.9.9.9"];
+    };
+    const proxy = await startEgressProxy({ rules: parseAllowedHosts("*"), maxNames: 3, lookup });
+    try {
+      for (const host of ["a.example", "b.example", "c.example", "a.example", "d.example"]) await tunnel(proxy, `${host}:443`);
+      assert.deepEqual(asked, ["a.example", "b.example", "c.example", "a.example"], "a.example again; d.example, a fourth name, not at all");
+    } finally {
+      await proxy.close();
+    }
+  });
+
   it("looks up a dead host once, however often a page asks for it, and still looks up new ones (R21.1-1)", async () => {
     const asked = [];
     const lookup = async (host) => {

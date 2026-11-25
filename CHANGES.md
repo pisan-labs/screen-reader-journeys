@@ -102,3 +102,5 @@ Append-only journal, oldest first. Earlier history: `git log` and `docs/handoff.
 2026-11-25 [code] The run page shows each errored result's reason and a "still loading" note (summary.result_notes, no schema change); summary.md lists reasons.
 
 2026-11-25 [code] The dashboard listens for page changes from its first view, so a slow first page can be left.
+
+2026-11-25 [code] Minors R21.2-1 to -4, R22.3-1, R22.F-1: "And more." past the cap, a repeated start keeps the step limit, EAI_AGAIN only, and the missing tests.

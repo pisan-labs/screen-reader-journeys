@@ -282,6 +282,7 @@ export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs =
     const taken = new Set();
     let progressed = 0;
     let stepAt = -Infinity;
+    let startedKey = null;
     const onMessage = (/** @type {any} */ message) => {
       if (closed) return;
       if (message?.type === "result") {
@@ -304,8 +305,10 @@ export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs =
         const key = `${message.journey}\n${message.mode}`;
         if (!expected.has(key) || taken.has(key)) return malformed();
         if (message.step === undefined) {
-          // Each journey and mode's first step is passed on, however soon it comes (R21.1-2).
-          stepAt = -Infinity;
+          // Each journey and mode's first step is passed on, however soon it comes (R21.1-2); a
+          // start repeated for the same one does not lift the limit (R21.2-3).
+          if (key !== startedKey) stepAt = -Infinity;
+          startedKey = key;
           return onEvent({ kind: "start", journey: message.journey, mode: message.mode });
         }
         if (!isText(message.step, 200) || !isCount(message.n)) return malformed();
