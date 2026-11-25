@@ -37,7 +37,8 @@ function run(fields: Partial<Run> = {}): Run {
   };
 }
 
-type Answer = { status: number; body?: unknown } | Error;
+/** `wait`: the answer comes once it settles. */
+type Answer = { status: number; body?: unknown; wait?: Promise<unknown> } | Error;
 
 /** A fake supabase-js client for the two tables, recording what was asked. */
 function fakeClient({ runs = [] as Run[], runsError = null as string | null, reportsError = null as string | null, deleteError = null as string | null } = {}) {
@@ -110,6 +111,7 @@ async function setup({ session = SESSION, answers = {}, client = fakeClient(), h
     if (Array.isArray(answer)) answer = answer.length > 1 ? answer.shift()! : answer[0];
     if (!answer) answer = { status: 404, body: { error: 'Not found.' } };
     if (answer instanceof Error) throw answer;
+    if (answer.wait) await answer.wait;
     const { status, body: payload } = answer;
     return new Response(payload === undefined ? 'not json' : JSON.stringify(payload), { status });
   });
@@ -344,7 +346,7 @@ describe('the dashboard', () => {
           { status: 200, body: { run: run({ status: 'queued', summary: null, run_results: [], started_at: null, finished_at: null }) } },
           { status: 503, body: { error: 'restarting' } },
           { status: 200, body: { run: run({ status: 'running', summary: null, run_results: [], finished_at: null }) } },
-          { status: 200, body: { run: run({ summary: { passed: 1, files: ['home-page-tab-order.walker.md', 'summary.md'], skipped_files: ['huge.json'], skipped_count: 3, blocked_requests: ['10.0.0.1:80 (private)'] } }) } },
+          { status: 200, body: { run: run({ summary: { passed: 1, files: ['home-page-tab-order.walker.md', 'summary.md'], skipped_files: ['huge.json'], skipped_count: 3, blocked_requests: ['10.0.0.1:80 (private)'], blocked_count: 4 } }) } },
         ],
       },
     });
@@ -360,8 +362,15 @@ describe('the dashboard', () => {
     expect(button.textContent).toBe('Download the report for Home page: Tab order, Keyboard walker');
     expect(view().textContent).not.toMatch(/The server sleeps/);
     expect(view().textContent).toMatch(/Files not kept.*too large, too many, a name or type a report cannot have, or saving took too long.*huge\.json.*And 2 more\./);
-    expect(view().textContent).toMatch(/Blocked requests.*10\.0\.0\.1:80/);
+    expect(view().textContent).toMatch(/Blocked requests.*10\.0\.0\.1:80.*And 3 more\./);
     expect(view().textContent).toMatch(/2 of 2.*1 error, 0 warnings/);
+  });
+
+  it('says "And at least N more." when the server left refused requests out past its cap (R21.1-4)', async () => {
+    const summary = { passed: 1, files: ['summary.md'], blocked_requests: ['10.0.0.1:80 (private)'], blocked_count: 201, blocked_more: true };
+    await setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': { status: 200, body: CATALOG }, [`GET /runs/${RUN_ID}`]: { status: 200, body: { run: run({ summary }) } } } });
+    await until(() => view().textContent?.includes('Blocked requests') ?? false, 'the run');
+    expect(view().textContent).toMatch(/And at least 200 more\./);
   });
 
   it('fetches a report only when asked, and saves it as a download, never as a page', async () => {
@@ -590,10 +599,12 @@ describe('progress while a run is going (the owner: "The run is running." says t
     ];
     const ui = setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': { status: 200, body: CATALOG }, [`GET /runs/${RUN_ID}`]: running, [`GET /runs/${RUN_ID}/progress`]: steps.map((p) => ({ status: 200, body: { progress: p } })) } });
     const seen = announcements();
-    await ui;
+    const { requests } = await ui;
     await until(() => box().includes('Running 3 of 4'), 'the third journey');
     await until(() => seen.length >= 2, 'two announcements');
-    await new Promise((r) => setTimeout(r, 120));
+    // Twenty more polls of the same state, longer than an announcement takes to land: none comes.
+    const polls = requests.filter((r) => r.path.endsWith('/progress')).length;
+    await until(() => requests.filter((r) => r.path.endsWith('/progress')).length >= polls + 20, 'twenty more polls');
     expect(seen).toEqual([
       'Running 2 of 4: Home page: Tab order, Keyboard walker. So far: 1 passed, 0 failed, 0 errors.',
       'Running 3 of 4: Other, Keyboard walker. So far: 1 passed, 1 failed, 0 errors.',
@@ -602,16 +613,103 @@ describe('progress while a run is going (the owner: "The run is running." says t
 
   it('shows nothing when the server has no progress for the run', async () => {
     const ui = await setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': { status: 200, body: CATALOG }, [`GET /runs/${RUN_ID}`]: running, [`GET /runs/${RUN_ID}/progress`]: { status: 200, body: { progress: null } } } });
-    await until(() => ui.requests.some((r) => r.path.endsWith('/progress')), 'a progress request');
-    await new Promise((r) => setTimeout(r, 20));
+    // The second answer comes after the first was shown.
+    await until(() => ui.requests.filter((r) => r.path.endsWith('/progress')).length >= 2, 'two progress requests');
     expect(box()).toBe('');
   });
 
   it('asks for progress only while the run is running', async () => {
-    const ui = await setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': { status: 200, body: CATALOG }, [`GET /runs/${RUN_ID}`]: { status: 200, body: { run: run() } } } });
-    await until(() => !!document.querySelector('#status-heading'), 'the run');
-    await new Promise((r) => setTimeout(r, 30));
+    const queued = { status: 200, body: { run: run({ status: 'queued', summary: null, run_results: [], started_at: null, finished_at: null }) } };
+    const ui = await setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': { status: 200, body: CATALOG }, [`GET /runs/${RUN_ID}`]: queued } });
+    // A queued run is polled; three polls in, none of them asked for progress.
+    await until(() => ui.requests.filter((r) => r.path === `/runs/${RUN_ID}`).length >= 3, 'three polls');
     expect(ui.requests.some((r) => r.path.endsWith('/progress'))).toBe(false);
+  });
+
+  for (const [what, answer, said] of [
+    ['no progress yet', { status: 200, body: { progress: null } }, 'The run is running.'],
+    ['the progress request failing', { status: 502, body: { error: 'down' } }, 'The run is running.'],
+    ['progress to say', { status: 200, body: { progress: progress() } }, 'Running 2 of 4: Home page: Tab order, Keyboard walker. So far: 1 passed, 0 failed, 0 errors.'],
+  ] as const) {
+    it(`says "The run is running." when it starts only if the progress says nothing: ${what} (R19.1-3)`, async () => {
+      const queued = { status: 200, body: { run: run({ status: 'queued', summary: null, run_results: [], started_at: null, finished_at: null }) } };
+      const ui = setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': { status: 200, body: CATALOG }, [`GET /runs/${RUN_ID}`]: [queued, running], [`GET /runs/${RUN_ID}/progress`]: answer } });
+      const seen = announcements();
+      const { requests } = await ui;
+      await until(() => seen.length >= 1, 'an announcement');
+      const polls = requests.filter((r) => r.path === `/runs/${RUN_ID}`).length;
+      await until(() => requests.filter((r) => r.path === `/runs/${RUN_ID}`).length >= polls + 20, 'twenty more polls');
+      expect(seen).toEqual([said]);
+    });
+  }
+
+  it('says "The run is running." once, not again for each result while it runs (R21.1-5)', async () => {
+    const queued = { status: 200, body: { run: run({ status: 'queued', summary: null, run_results: [], started_at: null, finished_at: null }) } };
+    const withResult = { status: 200, body: { run: run({ status: 'running', summary: null, finished_at: null }) } };
+    const ui = setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': { status: 200, body: CATALOG }, [`GET /runs/${RUN_ID}`]: [queued, ...Array.from({ length: 20 }, () => running), withResult], [`GET /runs/${RUN_ID}/progress`]: { status: 200, body: { progress: null } } } });
+    const seen = announcements();
+    const { requests } = await ui;
+    // The result comes 20 polls after the start, well after its announcement has landed (50 ms).
+    await until(() => requests.filter((r) => r.path === `/runs/${RUN_ID}`).length >= 45, 'polls past the result');
+    expect(seen).toEqual(['The run is running.']);
+  });
+
+  it('does not say the progress again after a failed request (R21.1-5)', async () => {
+    const said = { status: 200, body: { progress: progress() } };
+    const ui = setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': { status: 200, body: CATALOG }, [`GET /runs/${RUN_ID}`]: running, [`GET /runs/${RUN_ID}/progress`]: [
+      ...Array.from({ length: 20 }, () => said),
+      ...Array.from({ length: 5 }, () => ({ status: 502, body: { error: 'down' } })),
+      said,
+    ] } });
+    const seen = announcements();
+    const { requests } = await ui;
+    await until(() => requests.filter((r) => r.path.endsWith('/progress')).length >= 40, 'polls past the failures');
+    expect(seen).toEqual(['Running 2 of 4: Home page: Tab order, Keyboard walker. So far: 1 passed, 0 failed, 0 errors.']);
+  });
+
+  it('says nothing for a run page left while the journeys were still loading (R21.1-5)', async () => {
+    let release = () => {};
+    const wait = new Promise((resolve) => (release = () => resolve(undefined)));
+    // The first view draws its progress without the catalog (two failed requests), then a later
+    // poll asks for the catalog again, and that request is held while the page is left. Each
+    // request takes one answer off the front while more than one is left.
+    const down = { status: 500, body: { error: 'down' } };
+    const catalog: Answer[] = [down, down, { status: 200, body: CATALOG, wait }, { status: 200, body: CATALOG }];
+    const ui = setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': catalog, [`GET /runs/${RUN_ID}`]: running, [`GET /runs/${RUN_ID}/progress`]: { status: 200, body: { progress: progress() } } } });
+    const seen = announcements();
+    await ui;
+    await until(() => catalog.length === 1, 'the held catalog request');
+    const box = document.getElementById('progress')!;
+    const before = box.textContent;
+    expect(before).toMatch(/Running 2 of 4: targets\/generic\/home-tab-order\.journey\.js/);
+    window.location.hash = '#/';
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    release();
+    // Both pages wait on that one catalog request, the old one first: once the runs page shows the
+    // catalog's journeys, the old page has had its turn.
+    await until(() => view().textContent?.includes('Home page: Tab order') ?? false, 'the runs page with the catalog');
+    expect(box.textContent, 'the page left behind is not drawn on').toBe(before);
+    expect(seen.filter((t) => t.includes('Home page: Tab order'))).toEqual([]);
+  });
+
+  it('says the progress again after it went away (a requeued run starting again) (R19.1-8)', async () => {
+    const ui = setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': { status: 200, body: CATALOG }, [`GET /runs/${RUN_ID}`]: running, [`GET /runs/${RUN_ID}/progress`]: [
+      ...Array.from({ length: 20 }, () => ({ status: 200, body: { progress: progress() } })),
+      ...Array.from({ length: 20 }, () => ({ status: 200, body: { progress: null } })),
+      { status: 200, body: { progress: progress() } },
+    ] } });
+    const seen = announcements();
+    await ui;
+    await until(() => seen.length >= 2, 'the progress said twice');
+    expect(seen[0]).toBe(seen[1]);
+  });
+
+  it("uses the server's clock, and says when the reports are being saved (R19.1-5, R19.1-6)", async () => {
+    const long = progress({ started_at: new Date(Date.now() - 3 * 3600_000).toISOString(), elapsed_s: 80, phase: 'saving', journey: null, mode: null, step: null, n: null, done: 4, passed: 4 });
+    await setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': { status: 200, body: CATALOG }, [`GET /runs/${RUN_ID}`]: running, [`GET /runs/${RUN_ID}/progress`]: { status: 200, body: { progress: long } } } });
+    await until(() => box().includes('Saving'), 'the saving phase');
+    expect(box()).toMatch(/Saving the reports: 4 of 4 journey runs finished\./);
+    expect(box()).toMatch(/1 min 20 s of 15 min\./);
   });
 
   it('writes durations the way people say them', () => {

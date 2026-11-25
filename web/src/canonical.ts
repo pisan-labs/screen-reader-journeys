@@ -6,13 +6,17 @@
  * So the page first moves itself to the one address, and sign-in always returns there.
  */
 
-/** The https origin VITE_SITE_URL names, or null when it is unset or not https (local work). */
+/**
+ * The origin VITE_SITE_URL names, or null when it is unset, or http on any host but a loopback
+ * one (the build checks it too: src/build/headers.ts, checkSiteUrl). Loopback is for the tests.
+ */
 export function canonicalOrigin(env: Record<string, unknown> = import.meta.env): string | null {
   const raw = String(env.VITE_SITE_URL ?? '').trim();
   if (!raw) return null;
   try {
     const url = new URL(raw);
-    return url.protocol === 'https:' ? url.origin : null;
+    const local = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+    return url.protocol === 'https:' || (url.protocol === 'http:' && local) ? url.origin : null;
   } catch {
     return null;
   }

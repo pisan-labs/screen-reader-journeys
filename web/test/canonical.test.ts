@@ -15,6 +15,12 @@ describe('canonicalOrigin', () => {
     expect(canonicalOrigin({ VITE_SITE_URL: 'http://screen-reader-journeys.hintwise.org' })).toBeNull();
     expect(canonicalOrigin({ VITE_SITE_URL: 'not a url' })).toBeNull();
   });
+
+  it('takes http on a loopback host, for the tests', () => {
+    expect(canonicalOrigin({ VITE_SITE_URL: 'http://127.0.0.1:4173' })).toBe('http://127.0.0.1:4173');
+    expect(canonicalOrigin({ VITE_SITE_URL: 'http://localhost:5173/' })).toBe('http://localhost:5173');
+    expect(canonicalOrigin({ VITE_SITE_URL: 'ftp://127.0.0.1/' })).toBeNull();
+  });
 });
 
 describe('canonicalHref', () => {

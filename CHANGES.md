@@ -92,3 +92,7 @@ Append-only journal, oldest first. Earlier history: `git log` and `docs/handoff.
 2026-11-24 [note] PManager: "*" live on Render at 12:48:33Z on 44e41bf with CHROMIUM_SANDBOX=true; the start-up sandbox probe passed, so R7.1's options B and C are not needed.
 
 2026-11-24 [code] #20 round 1: a run keeps at most 200 different refusals and one byte-limit entry (R20.1-1); at a stop, late refusals are sent before the exit, tested end to end.
+
+2026-11-24 [code] Follow-ups for 26 Nov (#15): stop path, progress and summary bounds, one address checked at build, test gaps; R5.2, R6.3, R9.2-R9.7, R18.1, R19.1, R20.2.
+
+2026-11-24 [code] #21 round 1: a dead host costs one lookup, each name counted once (R21.1-1); step clock per mode, progress cap by run length, blocked count as a floor, entries cut.

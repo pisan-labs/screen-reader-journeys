@@ -269,6 +269,8 @@ describe("HTTP API", () => {
     assert.equal((await call("GET", `/runs/${run.id}/progress`, { token: "bob-token" })).status, 404, "another person's run");
     assert.equal((await call("GET", `/runs/${run.id}/progress`)).status, 401);
     assert.equal((await call("GET", "/runs/not-a-uuid/progress", { token: "alice-token" })).status, 404);
+    // An upper-case id finds the run, and its progress too (R19.1-8).
+    assert.deepEqual((await call("GET", `/runs/${run.id.toUpperCase()}/progress`, { token: "alice-token" })).body, { progress: where });
     progressNow.clear();
   });
 

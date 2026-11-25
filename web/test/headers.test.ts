@@ -2,12 +2,14 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import {
   checkPublicKey,
+  checkSiteUrl,
   checkUrl,
   contentSecurityPolicy,
   cspHash,
   headersFile,
   licensesFile,
   packageOf,
+  siteScript,
   styleAttributes,
   styleElements,
 } from '../src/build/headers';
@@ -22,6 +24,40 @@ describe('build-time settings', () => {
     expect(() => checkUrl('U', '', true)).toThrow(/U is not set/);
     expect(() => checkUrl('U', 'not a url', true)).toThrow(/U is not a URL/);
     expect(() => checkUrl('U', 'http://api.example.org', true)).toThrow(/must start with https/);
+  });
+
+  it('takes VITE_SITE_URL as an origin: required, https and on hintwise.org in production builds (R18.1-1)', () => {
+    const SITE = 'https://screen-reader-journeys.hintwise.org';
+    expect(checkSiteUrl('S', ` ${SITE}/ `, true)).toBe(SITE);
+    expect(checkSiteUrl('S', 'https://hintwise.org', true)).toBe('https://hintwise.org');
+    expect(() => checkSiteUrl('S', '', true)).toThrow(/S is not set/);
+    expect(() => checkSiteUrl('S', 'http://screen-reader-journeys.hintwise.org', true)).toThrow(/must start with https/);
+    expect(() => checkSiteUrl('S', 'http://127.0.0.1:4173', true)).toThrow(/must start with https/);
+    expect(() => checkSiteUrl('S', 'https://screen-reader-journeys.netlify.app', true)).toThrow(/on hintwise\.org/);
+    expect(() => checkSiteUrl('S', 'https://evilhintwise.org', true)).toThrow(/on hintwise\.org/);
+    expect(() => checkSiteUrl('S', `${SITE}/runs`, true)).toThrow(/nothing after it/);
+    expect(() => checkSiteUrl('S', `${SITE}/?x=1`, true)).toThrow(/nothing after it/);
+    expect(() => checkSiteUrl('S', 'not a url', true)).toThrow(/S is not a URL/);
+    // Elsewhere: empty is fine, and so is a loopback address (the tests).
+    expect(checkSiteUrl('S', undefined, false)).toBe('');
+    expect(checkSiteUrl('S', 'http://127.0.0.1:4173', false)).toBe('http://127.0.0.1:4173');
+    expect(() => checkSiteUrl('S', 'http://example.org', false)).toThrow(/must start with https/);
+  });
+
+  it('writes site.js, which moves a page opened elsewhere and keeps the analytics script from counting it (R18.1-6)', () => {
+    const SITE = 'https://screen-reader-journeys.hintwise.org';
+    const run = (href: string) => {
+      const url = new URL(href);
+      const moved: string[] = [];
+      const win: { hintwise?: { track: () => void } } = {};
+      const location = { origin: url.origin, pathname: url.pathname, search: url.search, hash: url.hash, replace: (to: string) => moved.push(to) };
+      new Function('window', 'location', siteScript(SITE))(win, location);
+      return { moved, counted: !win.hintwise };
+    };
+    expect(run('https://screen-reader-journeys.netlify.app/index.html?x=1#/runs/abc')).toEqual({ moved: [`${SITE}/index.html?x=1#/runs/abc`], counted: false });
+    expect(run(`${SITE}/#/runs`)).toEqual({ moved: [], counted: true });
+    // The origin goes in as a string literal, quotes escaped (it is a checked origin in any case).
+    expect(siteScript('https://a.hintwise.org/"x')).toContain('var origin = "https://a.hintwise.org/\\"x";');
   });
 
   it('takes the anon key and refuses a service-role or secret key', () => {

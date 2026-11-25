@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { createServer, request } from "node:http";
 import net from "node:net";
 import { after, before, describe, it } from "node:test";
-import { startEgressProxy } from "../server/egress-proxy.js";
+import { MAX_TRIES, startEgressProxy } from "../server/egress-proxy.js";
 import { checkTargetUrl, isPrivateAddress, parseAllowedHosts, resolveEgress } from "../server/hosts.js";
 
 const rules = parseAllowedHosts("*.vercel.app, stem-accessibility.example.org, 127.0.0.1:4173, *.bücher.example");
@@ -728,6 +728,67 @@ describe("the egress proxy connects to the checked address, and limits a run's b
       for (const host of ["a.example", "b.example", "a.example", "c.example", "d.example"]) await tunnel(proxy, `${host}:443`);
       assert.deepEqual(asked, ["a.example", "b.example", "c.example"], "a.example once; d.example not at all");
       assert.ok(proxy.blocked.some((b) => b.startsWith("d.example:443 ") && /more than 3 host names in this run/.test(b)), proxy.blocked.join("\n"));
+    } finally {
+      await proxy.close();
+    }
+  });
+
+  const failing = (code, host) => Object.assign(new Error(`getaddrinfo ${code} ${host}`), { code });
+
+  it("tries a host again after a lookup that may pass, and counts the name once (R9.4)", async () => {
+    const asked = [];
+    const lookup = async (host) => {
+      asked.push(host);
+      if (asked.length === 1) throw failing("EAI_AGAIN", host);
+      return ["10.9.9.9"];
+    };
+    const proxy = await startEgressProxy({ rules: parseAllowedHosts("*"), maxNames: 3, lookup });
+    try {
+      for (const host of ["a.example", "a.example", "a.example", "b.example", "c.example", "d.example"]) await tunnel(proxy, `${host}:443`);
+      assert.deepEqual(asked, ["a.example", "a.example", "b.example", "c.example"], "the failed one again, the answer after it kept, and a.example counted once");
+      assert.ok(proxy.blocked.some((b) => b.startsWith("d.example:443 ") && /more than 3 host names in this run/.test(b)), proxy.blocked.join("\n"));
+    } finally {
+      await proxy.close();
+    }
+  });
+
+  it(`tries such a host at most ${MAX_TRIES} times in a run (R9.4)`, async () => {
+    const asked = [];
+    const proxy = await startEgressProxy({ rules: parseAllowedHosts("*"), lookup: async (host) => (asked.push(host), Promise.reject(failing("EAI_AGAIN", host))) });
+    try {
+      for (let i = 0; i < 10; i++) await tunnel(proxy, "busy.example:443");
+      assert.equal(asked.length, MAX_TRIES);
+    } finally {
+      await proxy.close();
+    }
+  });
+
+  it("looks up a dead host once, however often a page asks for it, and still looks up new ones (R21.1-1)", async () => {
+    const asked = [];
+    const lookup = async (host) => {
+      asked.push(host);
+      if (host === "dead.example") throw failing("ENOTFOUND", host);
+      return ["93.184.216.34"];
+    };
+    const proxy = await startEgressProxy({ rules: parseAllowedHosts("*"), lookup });
+    try {
+      for (let i = 0; i < 600; i++) await tunnel(proxy, "dead.example:443");
+      await tunnel(proxy, "real-cdn.example:443");
+      assert.deepEqual(asked, ["dead.example", "real-cdn.example"]);
+      assert.ok(!proxy.blocked.some((b) => b.startsWith("real-cdn.example")), proxy.blocked.join("\n"));
+    } finally {
+      await proxy.close();
+    }
+  });
+
+  it("cuts a long refusal in the middle, so its reason still shows (R21.1-6)", async () => {
+    const host = `${"h".repeat(15_000)}.example`;
+    const proxy = await startEgressProxy({ rules: parseAllowedHosts("*"), lookup: async (h) => Promise.reject(failing("ENOTFOUND", h)) });
+    try {
+      await tunnel(proxy, `${host}:443`);
+      const [entry] = proxy.blocked;
+      assert.ok(entry.length <= 2000, String(entry.length));
+      assert.ok(entry.startsWith("hhhh") && entry.endsWith(".example (ENOTFOUND))"), entry.slice(-80));
     } finally {
       await proxy.close();
     }
