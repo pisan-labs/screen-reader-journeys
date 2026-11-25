@@ -366,6 +366,23 @@ describe('the dashboard', () => {
     expect(view().textContent).toMatch(/2 of 2.*1 error, 0 warnings/);
   });
 
+  it("shows each errored result's reason, and a note when its page never went quiet, under the result", async () => {
+    const notes = [
+      { journey: 'targets/generic/home-tab-order.journey.js', mode: 'walker', error: 'Not run: https://preview.vercel.app/ did not load in an earlier journey (page.goto: Timeout 120000ms exceeded.)' },
+      { journey: 'targets/generic/home-tab-order.journey.js', mode: 'virtual', still_loading: true },
+    ];
+    const results = [
+      { journey: 'targets/generic/home-tab-order.journey.js', mode: 'walker', status: 'error', checks_passed: 0, checks_total: 0, errors: 0, warnings: 0, report_path: null },
+      { journey: 'targets/generic/home-tab-order.journey.js', mode: 'virtual', status: 'pass', checks_passed: 1, checks_total: 1, errors: 0, warnings: 0, report_path: null },
+    ];
+    await setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': { status: 200, body: CATALOG }, [`GET /runs/${RUN_ID}`]: { status: 200, body: { run: run({ summary: { passed: 1, files: [], result_notes: notes }, run_results: results }) } } } });
+    await until(() => !!view().querySelector('table[aria-labelledby="results-heading"]'), 'the results');
+    const rows = [...view().querySelectorAll('table[aria-labelledby="results-heading"] tbody tr')].map((tr) => tr.textContent ?? '');
+    expect(rows[0]).toContain('Not run: https://preview.vercel.app/ did not load in an earlier journey');
+    expect(rows[1]).toContain('The page may still have been loading: the walk may be incomplete.');
+    expect(rows[1]).not.toContain('Not run');
+  });
+
   it('says "And at least N more." when the server left refused requests out past its cap (R21.1-4)', async () => {
     const summary = { passed: 1, files: ['summary.md'], blocked_requests: ['10.0.0.1:80 (private)'], blocked_count: 201, blocked_more: true };
     await setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': { status: 200, body: CATALOG }, [`GET /runs/${RUN_ID}`]: { status: 200, body: { run: run({ summary }) } } } });

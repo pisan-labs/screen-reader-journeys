@@ -31,7 +31,8 @@ export function isResult(r) {
     (r.error === null || isText(r.error, 100_000)) &&
     ["checks_total", "checks_passed", "errors", "warnings"].every((key) => isCount(r[key])) &&
     r.checks_passed <= r.checks_total &&
-    isText(r.report_base, 500)
+    isText(r.report_base, 500) &&
+    (r.still_loading === undefined || r.still_loading === true)
   );
 }
 /**
@@ -291,7 +292,7 @@ export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs =
         taken.add(key);
         // Only the fields the worker uses: anything else the process added is not kept.
         const r = message.result;
-        results.push({ journey: r.journey, name: r.name, mode: r.mode, status: r.status, error: r.error, checks_total: r.checks_total, checks_passed: r.checks_passed, errors: r.errors, warnings: r.warnings, report_base: r.report_base });
+        results.push({ journey: r.journey, name: r.name, mode: r.mode, status: r.status, error: r.error, checks_total: r.checks_total, checks_passed: r.checks_passed, errors: r.errors, warnings: r.warnings, report_base: r.report_base, ...(r.still_loading ? { still_loading: true } : {}) });
         keep(refused);
         onEvent({ kind: "result", journey: r.journey, mode: r.mode, status: r.status });
       } else if (message?.type === "progress") {

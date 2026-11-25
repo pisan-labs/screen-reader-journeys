@@ -43,6 +43,8 @@ const SKIPPED_NAMED = 20;
 const SUMMARY_BYTES = 48 * 1024;
 const NAME_CHARS = 200;
 const BLOCKED_CHARS = 300;
+/** A result's reason, as the run's page shows it under the result (the report has it whole). */
+const REASON_CHARS = 300;
 
 /** At most this many files left out one by one get a log line each; the rest are counted. */
 const LOGGED_EACH = 30;
@@ -115,6 +117,14 @@ const short = (text, max = 500) => {
   return points.length > max ? `${points.slice(0, max - 1).join("")}…` : points.join("");
 };
 
+/** `result_notes` for the results with a reason or a note, if any. */
+function resultNotes(results) {
+  const notes = results
+    .filter((r) => r.error || r.still_loading)
+    .map((r) => ({ journey: cut(r.journey, NAME_CHARS), mode: r.mode, ...(r.error ? { error: cut(r.error, REASON_CHARS) } : {}), ...(r.still_loading ? { still_loading: true } : {}) }));
+  return notes.length ? { result_notes: notes } : {};
+}
+
 export function summarizeRun({ results, blocked, outcome, blockedMore = false }, files, skipped = []) {
   const refused = [...new Set([...blocked.filter(isByteLimit), ...blocked].map((entry) => cut(entry, BLOCKED_CHARS)))];
   /** @type {Record<string, any>} */
@@ -131,6 +141,9 @@ export function summarizeRun({ results, blocked, outcome, blockedMore = false },
     // The byte limit's entry first, so neither the cap of 50 nor the size guard drops it; each
     // entry once as shown, so after the cut (R6.3).
     blocked_requests: refused.slice(0, 50),
+    // Each errored result's reason, and each whose page never went quiet, for the run's page:
+    // run_results has no column for them.
+    ...resultNotes(results),
     timed_out: outcome === "timeout",
   };
   // Then, until it fits: fewer named files (one stays, so the page still says why), fewer blocked
@@ -139,6 +152,7 @@ export function summarizeRun({ results, blocked, outcome, blockedMore = false },
   const named = summary.skipped_files ?? [];
   while (size() > SUMMARY_BYTES && named.length > 1) named.pop();
   while (size() > SUMMARY_BYTES && summary.blocked_requests.length) summary.blocked_requests.pop();
+  while (size() > SUMMARY_BYTES && summary.result_notes?.length) summary.result_notes.pop();
   while (size() > SUMMARY_BYTES && named.length) named.pop();
   // How many there were, when the page shows fewer (R6.3).
   if (refused.length > summary.blocked_requests.length || blockedMore) summary.blocked_count = refused.length;

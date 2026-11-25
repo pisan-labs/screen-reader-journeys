@@ -1141,6 +1141,29 @@ describe("worker, with a fake run process", () => {
   });
 });
 
+describe("each result's reason and note, in the run's summary, for its page", () => {
+  const result = (journey, mode, fields = {}) => ({ journey, name: journey, mode, status: "pass", error: null, checks_total: 0, checks_passed: 0, errors: 0, warnings: 0, report_base: "x", ...fields });
+  it("has the reason of each errored result, cut, and the note of each whose page never went quiet", () => {
+    const results = [
+      result("a", "walker"),
+      result("b", "walker", { status: "error", error: `Not run: ${"x".repeat(1000)} did not load in an earlier journey (page.goto: Timeout 120000ms exceeded.)` }),
+      result("c", "virtual", { still_loading: true }),
+    ];
+    const { result_notes: notes } = summarizeRun({ results, blocked: [], outcome: "done" }, [], []);
+    assert.deepEqual(notes.map((n) => [n.journey, n.mode, Boolean(n.error), Boolean(n.still_loading)]), [["b", "walker", true, false], ["c", "virtual", false, true]]);
+    assert.ok(Array.from(notes[0].error).length <= 300 && notes[0].error.endsWith("exceeded.)"), notes[0].error.slice(-60));
+    assert.equal(summarizeRun({ results: [results[0]], blocked: [], outcome: "done" }, [], []).result_notes, undefined, "none when nothing to say");
+  });
+
+  it("drops notes, last first, before the summary would pass its size", () => {
+    const many = Array.from({ length: 400 }, (_, i) => result(`j${i}${"p".repeat(150)}`, "walker", { status: "error", error: "e".repeat(400) }));
+    const summary = summarizeRun({ results: many, blocked: [], outcome: "done" }, [], []);
+    assert.ok(Buffer.byteLength(JSON.stringify(summary)) <= 48 * 1024);
+    assert.ok(summary.result_notes.length > 0 && summary.result_notes.length < 400);
+    assert.ok(summary.result_notes[0].journey.startsWith("j0"), "the first ones kept");
+  });
+});
+
 describe("a run's refused requests in its summary (R6.3)", () => {
   it("are each shown once as cut, and counted when the page shows fewer", () => {
     // cut() keeps an entry's start and end, so these differ only in the part it leaves out.
@@ -1407,6 +1430,13 @@ process.stdin.on("end", () => {
     assert.equal(outcome.error, "The run process sent a malformed message.");
   });
 
+  it("keeps a result's still_loading, true or absent, and refuses any other value", async () => {
+    const outcome = await probe([{ type: "result", result: { ...good, still_loading: true } }, { type: "done" }]);
+    assert.deepEqual(outcome.results, [{ ...good, still_loading: true }]);
+    const bad = await probe([{ type: "result", result: { ...good, still_loading: "yes" } }, { type: "done" }]);
+    assert.equal(bad.error, "The run process sent a malformed message.");
+  });
+
   it("keeps only the fields of a result that the worker uses (R8.4)", async () => {
     const outcome = await probe([{ type: "result", result: { ...good, x: Array.from({ length: 1000 }, () => ({})) } }, { type: "done" }]);
     assert.equal(outcome.outcome, "done");
@@ -1446,6 +1476,8 @@ process.stdin.on("end", () => {
       assert.ok(JSON.stringify({ type: "result", result: summary, blocked: [] }).length < MAX_MESSAGE);
     }
     assert.equal(summarizeResult(result(null), "x").error, null);
+    assert.equal(summarizeResult(result(null), "x").still_loading, undefined);
+    assert.equal(summarizeResult({ ...result(null), stillLoading: "the network was still busy" }, "x").still_loading, true, "a page that never went quiet says so");
     assert.equal(summarizeResult(result("short"), "x").error, "short");
   });
 

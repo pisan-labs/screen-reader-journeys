@@ -182,5 +182,8 @@ describe("opening the page", () => {
     assert.equal(result.status, "error");
     assert.match(result.error, /page\.goto: Timeout 2000ms exceeded/);
     assert.equal(result.notLoaded, true, "marked, so the run skips the others that open it (R22.2-2)");
+    // summary.md and summary.html say why, not only the journey's own report (R22.F-2).
+    assert.ok(renderSummary([result]).includes(`Errors:\n\n- Stuck, walker: ${result.error}`), renderSummary([result]));
+    assert.ok(renderSummaryHtml([result]).includes(`<h2>Errors</h2><ul><li>Stuck, walker: ${result.error}</li></ul>`));
   });
 });

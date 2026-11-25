@@ -90,6 +90,8 @@ export function renderSummary(results) {
     "|---|---|---|---|---|---|---|",
     ...rows,
     "",
+    // Why each errored one ended, a skipped one's "Not run: …" included (R22.F-2).
+    ...(results.some((r) => r.error) ? ["Errors:", "", ...results.filter((r) => r.error).map((r) => `- ${cell(r.journey)}, ${r.mode}: ${cell(r.error)}`), ""] : []),
     ...(results.some((r) => r.stillLoading)
       ? ["Notes:", "", ...results.filter((r) => r.stillLoading).map((r) => `- ${cell(r.journey)}, ${r.mode}: ${r.stillLoading}.`), ""]
       : []),

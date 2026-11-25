@@ -37,6 +37,8 @@ export function summarizeResult(result, path) {
     errors: result.findings.filter((f) => f.level === "error").length,
     warnings: result.findings.filter((f) => f.level === "warning").length,
     report_base: `${slug(result.journey)}.${result.mode}`,
+    // The page never went quiet: it may still have been loading (src/journey.js).
+    ...(result.stillLoading ? { still_loading: true } : {}),
   };
 }
 
@@ -64,9 +66,9 @@ export function sendLeftover(proxy, send) {
  * the browser under it (R9.2). Its refusals still go out, with what is left at the end.
  *
  * Once a journey's page has not loaded in time (runJourney's `notLoaded`), the run's other
- * journeys and modes that open that same page are not run, so a site that never loads does not
- * hold the one worker for the whole run timeout (R22.1-2, R22.2-3). Each gets a full result and a
- * report that says why (R22.2-1).
+ * journeys and modes that open that same page are not run: a site that never loads costs one
+ * load timeout for each distinct start page, not the whole run timeout (R22.1-2, R22.2-3,
+ * R22.3-2). Each gets a full result and a report that says why (R22.2-1).
  *
  * @param {any} job
  * @param {(message: object) => void} send

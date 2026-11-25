@@ -80,6 +80,8 @@ export interface RunSummary {
   blocked_count?: number;
   /** The server left some out past its cap: blocked_count is a floor. */
   blocked_more?: boolean;
+  /** Each errored result's reason, and each whose page never went quiet. */
+  result_notes?: { journey: string; mode: string; error?: string; still_loading?: boolean }[];
 }
 export interface RunResult {
   journey: string;
@@ -596,12 +598,19 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
                 results.map((r) => {
                   const name = journeyName(list, r.journey);
                   const mode = MODES[r.mode]?.[0] ?? r.mode;
+                  const note = run.summary?.result_notes?.find((n) => n.journey === r.journey && n.mode === r.mode);
                   return h(
                     'tr',
                     {},
                     h('th', { scope: 'row' }, name),
                     h('td', {}, mode),
-                    h('td', {}, badge(RESULT[r.status] ?? [r.status, 'bad'])),
+                    h(
+                      'td',
+                      {},
+                      badge(RESULT[r.status] ?? [r.status, 'bad']),
+                      note?.error ? h('p', { class: 'reason' }, note.error) : null,
+                      note?.still_loading ? h('p', { class: 'reason' }, 'The page may still have been loading: the walk may be incomplete.') : null,
+                    ),
                     h('td', {}, `${r.checks_passed} of ${r.checks_total}`),
                     h('td', {}, `${plural(r.errors, 'error')}, ${plural(r.warnings, 'warning')}`),
                     h('td', {}, (r.report_path && download(r.report_path, ['Download', hidden(` the report for ${name}, ${mode}`)])) || '—'),
