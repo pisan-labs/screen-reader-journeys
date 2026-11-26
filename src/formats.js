@@ -138,6 +138,7 @@ export function renderSummaryHtml(results) {
     `<h1>Screen reader journeys</h1>
 ${results[0] ? `<p>Site: ${escapeHtml(new URL(results[0].url).origin)}</p>` : ""}
 <div class="table-wrap"><table><caption>Results by journey and mode</caption><thead><tr><th scope="col">Journey</th><th scope="col">Mode</th><th scope="col">Result</th><th scope="col">Checks passed</th><th scope="col">Errors</th><th scope="col">Warnings</th></tr></thead><tbody>${rows}</tbody></table></div>
+${results.some((r) => r.error) ? `<h2>Errors</h2><ul>${results.filter((r) => r.error).map((r) => `<li>${escapeHtml(r.journey)}, ${escapeHtml(r.mode)}: ${escapeHtml(r.error)}</li>`).join("")}</ul>` : ""}
 ${results.some((r) => r.stillLoading) ? `<h2>Notes</h2><ul>${results.filter((r) => r.stillLoading).map((r) => `<li>${escapeHtml(r.journey)}, ${escapeHtml(r.mode)}: ${escapeHtml(r.stillLoading)}.</li>`).join("")}</ul>` : ""}
 ${hasComparison(results) ? '<p><a href="compare.html">Compare the modes side by side, step by step</a>.</p>' : ""}
 <p class="note">Findings are automatic and can be wrong; the transcripts are for a person to read. None of this replaces testing with a real screen reader and with people who use one.</p>`

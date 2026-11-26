@@ -80,6 +80,8 @@ export interface RunSummary {
   blocked_count?: number;
   /** The server left some out past its cap: blocked_count is a floor. */
   blocked_more?: boolean;
+  /** Each errored result's reason, and each whose page never went quiet. */
+  result_notes?: { journey: string; mode: string; error?: string; still_loading?: boolean }[];
 }
 export interface RunResult {
   journey: string;
@@ -596,12 +598,19 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
                 results.map((r) => {
                   const name = journeyName(list, r.journey);
                   const mode = MODES[r.mode]?.[0] ?? r.mode;
+                  const note = run.summary?.result_notes?.find((n) => n.journey === r.journey && n.mode === r.mode);
                   return h(
                     'tr',
                     {},
                     h('th', { scope: 'row' }, name),
                     h('td', {}, mode),
-                    h('td', {}, badge(RESULT[r.status] ?? [r.status, 'bad'])),
+                    h(
+                      'td',
+                      {},
+                      badge(RESULT[r.status] ?? [r.status, 'bad']),
+                      note?.error ? h('p', { class: 'reason' }, note.error) : null,
+                      note?.still_loading ? h('p', { class: 'reason' }, 'The page may still have been loading: the walk may be incomplete.') : null,
+                    ),
                     h('td', {}, `${r.checks_passed} of ${r.checks_total}`),
                     h('td', {}, `${plural(r.errors, 'error')}, ${plural(r.warnings, 'warning')}`),
                     h('td', {}, (r.report_path && download(r.report_path, ['Download', hidden(` the report for ${name}, ${mode}`)])) || '—'),
@@ -628,7 +637,9 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
             h('h2', {}, 'Blocked requests'),
             h('p', {}, "The server's network guard stopped the page from reaching these addresses. A journey that needs one may have failed because of it."),
             h('ul', {}, blocked.map((b) => h('li', { class: 'url' }, b))),
-            moreBlocked || run.summary?.blocked_more ? h('p', {}, `And ${run.summary?.blocked_more ? 'at least ' : ''}${moreBlocked} more.`) : null,
+            moreBlocked || run.summary?.blocked_more
+              ? h('p', {}, run.summary?.blocked_more ? (moreBlocked ? `And at least ${moreBlocked} more.` : 'And more.') : `And ${moreBlocked} more.`)
+              : null,
           ]
         : null,
       waiting ? null : [h('h2', {}, 'Delete'), h('p', {}, deleteButton(run))],
@@ -778,6 +789,9 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
       session = next;
       if (first) {
         first = false;
+        // Listening before the first view has finished: a slow first page (a catalog or a run
+        // still loading) must not keep the person from leaving it.
+        win.addEventListener('hashchange', () => void route());
         void Promise.resolve(route({ focus: false })).then(resolve);
         return;
       }
@@ -785,5 +799,4 @@ export async function startDashboard(deps: DashboardDeps): Promise<void> {
       if (changed) setTimeout(() => void route(), 0);
     });
   });
-  win.addEventListener('hashchange', () => void route());
 }

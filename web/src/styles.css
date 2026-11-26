@@ -368,6 +368,13 @@ thead th {
   background: var(--bad-bg);
 }
 
+/* A result's reason or note, under its badge in the results table. */
+.reason {
+  margin: 0.25rem 0 0;
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}
+
 .badge.busy {
   color: var(--busy);
   background: var(--busy-bg);

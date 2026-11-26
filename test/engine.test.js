@@ -105,6 +105,7 @@ describe("opening the page", () => {
       "/stuck.html": '<!doctype html><title>Stuck</title><button>One</button><img alt="" src="/forever">',
       "/late.html": late,
       "/held.html": '<!doctype html><title>Held</title><button>One</button><script>addEventListener("load", () => fetch("/hold"))</script>',
+      "/ok.html": '<!doctype html><title>OK</title><button>One</button>',
     };
     server = createServer((req, res) => {
       const path = req.url.split("?")[0];
@@ -176,11 +177,22 @@ describe("opening the page", () => {
     assert.equal(result.notLoaded, undefined, "it did load");
   });
 
+  it("does not mark the opening as failed when a later navigation times out (R22.3-1)", async () => {
+    const journey = { name: "Later", start: "/ok.html", run: (sr) => sr.page.goto(`${base}stuck.html`, { timeout: 1000 }) };
+    const result = await runJourney(journey, { mode: "walker", baseUrl: base, idleWaitMs: 1000 });
+    assert.equal(result.status, "error");
+    assert.match(result.error, /^page\.goto: Timeout 1000ms exceeded/);
+    assert.equal(result.notLoaded, undefined, "only the opening load sets it");
+  });
+
   it("still gives up on a page whose load event never fires", async () => {
     const journey = { name: "Stuck", start: "/stuck.html", run: (sr) => sr.walkTabOrder() };
     const result = await runJourney(journey, { mode: "walker", baseUrl: base, loadTimeoutMs: 2000 });
     assert.equal(result.status, "error");
     assert.match(result.error, /page\.goto: Timeout 2000ms exceeded/);
     assert.equal(result.notLoaded, true, "marked, so the run skips the others that open it (R22.2-2)");
+    // summary.md and summary.html say why, not only the journey's own report (R22.F-2).
+    assert.ok(renderSummary([result]).includes(`Errors:\n\n- Stuck, walker: ${result.error}`), renderSummary([result]));
+    assert.ok(renderSummaryHtml([result]).includes(`<h2>Errors</h2><ul><li>Stuck, walker: ${result.error}</li></ul>`));
   });
 });

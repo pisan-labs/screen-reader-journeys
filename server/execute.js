@@ -31,7 +31,8 @@ export function isResult(r) {
     (r.error === null || isText(r.error, 100_000)) &&
     ["checks_total", "checks_passed", "errors", "warnings"].every((key) => isCount(r[key])) &&
     r.checks_passed <= r.checks_total &&
-    isText(r.report_base, 500)
+    isText(r.report_base, 500) &&
+    (r.still_loading === undefined || r.still_loading === true)
   );
 }
 /**
@@ -281,6 +282,7 @@ export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs =
     const taken = new Set();
     let progressed = 0;
     let stepAt = -Infinity;
+    let startedKey = null;
     const onMessage = (/** @type {any} */ message) => {
       if (closed) return;
       if (message?.type === "result") {
@@ -291,7 +293,7 @@ export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs =
         taken.add(key);
         // Only the fields the worker uses: anything else the process added is not kept.
         const r = message.result;
-        results.push({ journey: r.journey, name: r.name, mode: r.mode, status: r.status, error: r.error, checks_total: r.checks_total, checks_passed: r.checks_passed, errors: r.errors, warnings: r.warnings, report_base: r.report_base });
+        results.push({ journey: r.journey, name: r.name, mode: r.mode, status: r.status, error: r.error, checks_total: r.checks_total, checks_passed: r.checks_passed, errors: r.errors, warnings: r.warnings, report_base: r.report_base, ...(r.still_loading ? { still_loading: true } : {}) });
         keep(refused);
         onEvent({ kind: "result", journey: r.journey, mode: r.mode, status: r.status });
       } else if (message?.type === "progress") {
@@ -303,8 +305,10 @@ export function executeRun(job, { timeoutMs, signal, killAfterMs = 5000, runAs =
         const key = `${message.journey}\n${message.mode}`;
         if (!expected.has(key) || taken.has(key)) return malformed();
         if (message.step === undefined) {
-          // Each journey and mode's first step is passed on, however soon it comes (R21.1-2).
-          stepAt = -Infinity;
+          // Each journey and mode's first step is passed on, however soon it comes (R21.1-2); a
+          // start repeated for the same one does not lift the limit (R21.2-3).
+          if (key !== startedKey) stepAt = -Infinity;
+          startedKey = key;
           return onEvent({ kind: "start", journey: message.journey, mode: message.mode });
         }
         if (!isText(message.step, 200) || !isCount(message.n)) return malformed();

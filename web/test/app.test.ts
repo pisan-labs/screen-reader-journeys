@@ -366,11 +366,36 @@ describe('the dashboard', () => {
     expect(view().textContent).toMatch(/2 of 2.*1 error, 0 warnings/);
   });
 
+  it("shows each errored result's reason, and a note when its page never went quiet, under the result", async () => {
+    const notes = [
+      { journey: 'targets/generic/home-tab-order.journey.js', mode: 'walker', error: 'Not run: https://preview.vercel.app/ did not load in an earlier journey (page.goto: Timeout 120000ms exceeded.)' },
+      { journey: 'targets/generic/home-tab-order.journey.js', mode: 'virtual', still_loading: true },
+    ];
+    const results = [
+      { journey: 'targets/generic/home-tab-order.journey.js', mode: 'walker', status: 'error', checks_passed: 0, checks_total: 0, errors: 0, warnings: 0, report_path: null },
+      { journey: 'targets/generic/home-tab-order.journey.js', mode: 'virtual', status: 'pass', checks_passed: 1, checks_total: 1, errors: 0, warnings: 0, report_path: null },
+    ];
+    await setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': { status: 200, body: CATALOG }, [`GET /runs/${RUN_ID}`]: { status: 200, body: { run: run({ summary: { passed: 1, files: [], result_notes: notes }, run_results: results }) } } } });
+    await until(() => !!view().querySelector('table[aria-labelledby="results-heading"]'), 'the results');
+    const rows = [...view().querySelectorAll('table[aria-labelledby="results-heading"] tbody tr')].map((tr) => tr.textContent ?? '');
+    expect(rows[0]).toContain('Not run: https://preview.vercel.app/ did not load in an earlier journey');
+    expect(rows[1]).toContain('The page may still have been loading: the walk may be incomplete.');
+    expect(rows[1]).not.toContain('Not run');
+  });
+
   it('says "And at least N more." when the server left refused requests out past its cap (R21.1-4)', async () => {
     const summary = { passed: 1, files: ['summary.md'], blocked_requests: ['10.0.0.1:80 (private)'], blocked_count: 201, blocked_more: true };
     await setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': { status: 200, body: CATALOG }, [`GET /runs/${RUN_ID}`]: { status: 200, body: { run: run({ summary }) } } } });
     await until(() => view().textContent?.includes('Blocked requests') ?? false, 'the run');
     expect(view().textContent).toMatch(/And at least 200 more\./);
+  });
+
+  it('says "And more." when the count left after the cut is no more than is shown (R21.2-1)', async () => {
+    const summary = { passed: 1, files: ['summary.md'], blocked_requests: ['10.0.0.1:80 (private)'], blocked_count: 1, blocked_more: true };
+    await setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': { status: 200, body: CATALOG }, [`GET /runs/${RUN_ID}`]: { status: 200, body: { run: run({ summary }) } } } });
+    await until(() => view().textContent?.includes('Blocked requests') ?? false, 'the run');
+    expect(view().textContent).toMatch(/And more\./);
+    expect(view().textContent).not.toMatch(/And at least 0 more/);
   });
 
   it('fetches a report only when asked, and saves it as a download, never as a page', async () => {
@@ -654,6 +679,15 @@ describe('progress while a run is going (the owner: "The run is running." says t
     expect(seen).toEqual(['The run is running.']);
   });
 
+  it('keeps what the progress box shows when a request fails (R21.2-2)', async () => {
+    const said = { status: 200, body: { progress: progress() } };
+    const ui = setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': { status: 200, body: CATALOG }, [`GET /runs/${RUN_ID}`]: running, [`GET /runs/${RUN_ID}/progress`]: [said, { status: 502, body: { error: 'down' } }, { status: 502, body: { error: 'down' } }] } });
+    const { requests } = await ui;
+    await until(() => box().includes('Running 2 of 4'), 'the progress');
+    await until(() => requests.filter((r) => r.path.endsWith('/progress')).length >= 4, 'polls past the failures');
+    expect(box()).toMatch(/Running 2 of 4/);
+  });
+
   it('does not say the progress again after a failed request (R21.1-5)', async () => {
     const said = { status: 200, body: { progress: progress() } };
     const ui = setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': { status: 200, body: CATALOG }, [`GET /runs/${RUN_ID}`]: running, [`GET /runs/${RUN_ID}/progress`]: [
@@ -690,6 +724,22 @@ describe('progress while a run is going (the owner: "The run is running." says t
     await until(() => view().textContent?.includes('Home page: Tab order') ?? false, 'the runs page with the catalog');
     expect(box.textContent, 'the page left behind is not drawn on').toBe(before);
     expect(seen.filter((t) => t.includes('Home page: Tab order'))).toEqual([]);
+  });
+
+  it('lets the person leave a first page that is still loading', async () => {
+    let release = () => {};
+    const wait = new Promise((resolve) => (release = () => resolve(undefined)));
+    const catalog: Answer[] = [{ status: 200, body: CATALOG, wait }, { status: 200, body: CATALOG }];
+    const ui = setup({ hash: `#/runs/${RUN_ID}`, answers: { 'GET /journeys': catalog, [`GET /runs/${RUN_ID}`]: { status: 200, body: { run: run() } } } });
+    await until(() => catalog.length === 1, 'the held catalog request');
+    // The address changes with no event of its own, so only this one can be heard: it comes
+    // while the first page is still loading.
+    window.history.replaceState(null, '', '#/');
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    release();
+    await ui;
+    await until(() => view().textContent?.includes('Start a run') ?? false, 'the runs page');
+    expect(view().querySelector('h1')?.textContent).not.toMatch(/^Run on/);
   });
 
   it('says the progress again after it went away (a requeued run starting again) (R19.1-8)', async () => {

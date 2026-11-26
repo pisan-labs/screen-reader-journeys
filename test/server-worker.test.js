@@ -1141,6 +1141,29 @@ describe("worker, with a fake run process", () => {
   });
 });
 
+describe("each result's reason and note, in the run's summary, for its page", () => {
+  const result = (journey, mode, fields = {}) => ({ journey, name: journey, mode, status: "pass", error: null, checks_total: 0, checks_passed: 0, errors: 0, warnings: 0, report_base: "x", ...fields });
+  it("has the reason of each errored result, cut, and the note of each whose page never went quiet", () => {
+    const results = [
+      result("a", "walker"),
+      result("b", "walker", { status: "error", error: `Not run: ${"x".repeat(1000)} did not load in an earlier journey (page.goto: Timeout 120000ms exceeded.)` }),
+      result("c", "virtual", { still_loading: true }),
+    ];
+    const { result_notes: notes } = summarizeRun({ results, blocked: [], outcome: "done" }, [], []);
+    assert.deepEqual(notes.map((n) => [n.journey, n.mode, Boolean(n.error), Boolean(n.still_loading)]), [["b", "walker", true, false], ["c", "virtual", false, true]]);
+    assert.ok(Array.from(notes[0].error).length <= 300 && notes[0].error.endsWith("exceeded.)"), notes[0].error.slice(-60));
+    assert.equal(summarizeRun({ results: [results[0]], blocked: [], outcome: "done" }, [], []).result_notes, undefined, "none when nothing to say");
+  });
+
+  it("drops notes, last first, before the summary would pass its size", () => {
+    const many = Array.from({ length: 400 }, (_, i) => result(`j${i}${"p".repeat(150)}`, "walker", { status: "error", error: "e".repeat(400) }));
+    const summary = summarizeRun({ results: many, blocked: [], outcome: "done" }, [], []);
+    assert.ok(Buffer.byteLength(JSON.stringify(summary)) <= 48 * 1024);
+    assert.ok(summary.result_notes.length > 0 && summary.result_notes.length < 400);
+    assert.ok(summary.result_notes[0].journey.startsWith("j0"), "the first ones kept");
+  });
+});
+
 describe("a run's refused requests in its summary (R6.3)", () => {
   it("are each shown once as cut, and counted when the page shows fewer", () => {
     // cut() keeps an entry's start and end, so these differ only in the part it leaves out.
@@ -1219,7 +1242,7 @@ describe("the run process's output is checked before it is used (R6.2)", () => {
    * stdout, then sends `messages` on fd 3 as JSON lines (or `raw` text instead), and exits.
    * Resolves to executeRun's outcome, and the lines it logged.
    */
-  const probe = async (messages, { job = JOB, output = "", raw = null, now = undefined } = {}) => {
+  const probe = async (messages, { job = JOB, output = "", raw = null, now = undefined, timeoutMs = 10000 } = {}) => {
     const folder = await mkdtemp(join(tmpdir(), "srj-probe-"));
     try {
       const file = join(folder, "probe.mjs");
@@ -1238,7 +1261,7 @@ process.stdin.on("end", () => {
       );
       const lines = [];
       const events = [];
-      const outcome = await executeRun(job, { timeoutMs: 10000, child: file, log: { log: (m) => lines.push(m), error: (m) => lines.push(m) }, onEvent: (e) => events.push(e), ...(now ? { now } : {}) });
+      const outcome = await executeRun(job, { timeoutMs, child: file, log: { log: (m) => lines.push(m), error: (m) => lines.push(m) }, onEvent: (e) => events.push(e), ...(now ? { now } : {}) });
       return Object.assign(outcome, { lines, events });
     } finally {
       await rm(folder, { recursive: true, force: true });
@@ -1378,6 +1401,20 @@ process.stdin.on("end", () => {
     assert.deepEqual(outcome.events.filter((e) => e.kind === "step").map((e) => e.step), ["w1", "v1"]);
   });
 
+  it("lets a long run send more than MAX_PROGRESS progress messages (R21.2-2)", async () => {
+    const start = { type: "progress", journey: good.journey, mode: "walker" };
+    const outcome = await probe([...Array.from({ length: MAX_PROGRESS + 1 }, () => start), { type: "done" }], { timeoutMs: 10_000_000 });
+    assert.equal(outcome.outcome, "done");
+    assert.equal(outcome.error, null);
+  });
+
+  it("does not lift the step limit for a start repeated for the same journey and mode (R21.2-3)", async () => {
+    const times = [0, 200];
+    const start = { type: "progress", journey: good.journey, mode: "walker" };
+    const outcome = await probe([start, { ...start, step: "s1", n: 1 }, start, { ...start, step: "s2", n: 2 }, { type: "done" }], { now: () => times.shift() ?? 10_000 });
+    assert.deepEqual(outcome.events.filter((e) => e.kind === "step").map((e) => e.step), ["s1"]);
+  });
+
   it("allows a longer run more progress messages (R21.1-3)", async () => {
     const { progressLimit } = await import("../server/execute.js");
     assert.equal(progressLimit(900_000, 12), MAX_PROGRESS, "15 minutes: the floor");
@@ -1405,6 +1442,13 @@ process.stdin.on("end", () => {
   it("refuses progress for a journey and mode that has already finished", async () => {
     const outcome = await probe([{ type: "result", result: good }, { type: "progress", journey: good.journey, mode: "walker" }]);
     assert.equal(outcome.error, "The run process sent a malformed message.");
+  });
+
+  it("keeps a result's still_loading, true or absent, and refuses any other value", async () => {
+    const outcome = await probe([{ type: "result", result: { ...good, still_loading: true } }, { type: "done" }]);
+    assert.deepEqual(outcome.results, [{ ...good, still_loading: true }]);
+    const bad = await probe([{ type: "result", result: { ...good, still_loading: "yes" } }, { type: "done" }]);
+    assert.equal(bad.error, "The run process sent a malformed message.");
   });
 
   it("keeps only the fields of a result that the worker uses (R8.4)", async () => {
@@ -1446,6 +1490,8 @@ process.stdin.on("end", () => {
       assert.ok(JSON.stringify({ type: "result", result: summary, blocked: [] }).length < MAX_MESSAGE);
     }
     assert.equal(summarizeResult(result(null), "x").error, null);
+    assert.equal(summarizeResult(result(null), "x").still_loading, undefined);
+    assert.equal(summarizeResult({ ...result(null), stillLoading: "the network was still busy" }, "x").still_loading, true, "a page that never went quiet says so");
     assert.equal(summarizeResult(result("short"), "x").error, "short");
   });
 
@@ -1602,6 +1648,22 @@ describe("run-child.js, when a journey's page does not load (R22.1-2, R22.2)", (
     } finally {
       await rm(out, { recursive: true, force: true });
     }
+  });
+
+  it("saves the reports of journeys it did not run, a skipped one last included (R22.F-1)", async () => {
+    // Basic's page does not load and Hang, which opens the same page, comes last: only the skip
+    // itself can save Hang's report.
+    const { runJob } = await import("../server/run-child.js");
+    const saves = [];
+    let runs = 0;
+    const lastJob = { allowedTargetHosts: "", baseUrl: BASE, journeys: [BASIC, HANG].map((path) => ({ path, file: join(REPO_ROOT, path) })), modes: ["walker"], outDir: "unused" };
+    await runJob(lastJob, () => {}, {
+      startProxy: async () => stubProxy(),
+      write: async (results) => saves.push(results.map((r) => [r.journey, r.error])),
+      run: async (journey, { mode, baseUrl }) => ((runs += 1), resultOf(journey, mode, new URL(journey.start, baseUrl).href, failed)),
+    });
+    assert.equal(runs, 1);
+    assert.deepEqual(saves.at(-1), [["Basic test page", failed.error], ["Hanging journey", why]]);
   });
 
   it("goes on after a timeout that is not the opening load, even one with the same words (R22.2-2)", async () => {

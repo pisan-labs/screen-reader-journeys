@@ -27,8 +27,11 @@ export const MAX_BYTES = 100 * 1024 * 1024;
 export const MAX_NAMES = 500;
 /** How often one host name is looked up in a run when its lookups fail for a passing reason. */
 export const MAX_TRIES = 4;
-/** DNS failures that may pass (a busy resolver, a timeout): such a host is tried again. */
-const PASSING = new Set(["EAI_AGAIN", "ETIMEOUT", "ETIMEDOUT", "ECONNREFUSED", "ESERVFAIL"]);
+/**
+ * DNS failures that may pass: such a host is tried again. systemLookup uses getaddrinfo, whose
+ * only one is EAI_AGAIN (a busy resolver; glibc reports a resolver timeout so too) (R21.2-4).
+ */
+const PASSING = new Set(["EAI_AGAIN"]);
 /** The longest refusal entry, cut in the middle so its reason shows (R21.1-6). */
 const ENTRY_CHARS = 2000;
 /** The start of the entry that says a run reached MAX_BYTES; summaries keep it first. */
