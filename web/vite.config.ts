@@ -7,6 +7,7 @@ import {
   checkUrl,
   contentSecurityPolicy,
   headersFile,
+  HW_THEME_STYLE_CSP,
   licensesFile,
   packageOf,
   styleAttributes,
@@ -39,7 +40,7 @@ function hostedFiles(env: Record<string, string>): Plugin {
       if (site) this.emitFile({ type: 'asset', fileName: 'site.js', source: siteScript(site) });
       const html = readFileSync('index.html', 'utf8');
       const svg = readFileSync('src/lib/google-g-light.svg', 'utf8');
-      const policy = contentSecurityPolicy({ supabaseUrl, apiUrl, styles: [...styleElements(html), SIGN_IN_CSS], styleAttributes: styleAttributes(svg) });
+      const policy = contentSecurityPolicy({ supabaseUrl, apiUrl, styles: [...styleElements(html), SIGN_IN_CSS], styleAttributes: styleAttributes(svg), styleHashes: [HW_THEME_STYLE_CSP] });
       this.emitFile({ type: 'asset', fileName: '_headers', source: headersFile(policy) });
 
       const packages = new Map<string, PackageInfo>();

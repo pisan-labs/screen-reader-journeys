@@ -215,6 +215,31 @@ describe("dashboard under its Content-Security-Policy", () => {
     assert.match(csp, /script-src 'self' https:\/\/challenges\.cloudflare\.com(;|$)/);
     assert.match(csp, new RegExp(`connect-src 'self' ${SUPABASE} ${API}(;|$)`));
     assert.match(csp, /frame-ancestors 'none'/);
+    // The theme switch's fallback <style>, for browsers without constructed stylesheets (web/src/build/headers.ts).
+    assert.match(csp, /style-src [^;]*'sha256-tNUGw7LItOaI5ajM98DiNLm0frYaQ8fVgVRz4\/I6Xy4='(;|$)/);
+  });
+
+  it("styles the theme switch with no violation where constructed stylesheets are missing (Safari before 16.4)", async () => {
+    const browser = await chromium.launch();
+    try {
+      const page = await browser.newPage();
+      const violations = [];
+      page.on("console", (message) => /Content Security Policy|Refused to/i.test(message.text()) && violations.push(message.text()));
+      await page.addInitScript(() => delete CSSStyleSheet.prototype.replaceSync);
+      await fakeBackend(page, { signedIn: false });
+      await page.goto(`${site.url}/index.html`);
+      await page.locator("button.hw-signin-google").waitFor();
+      const looks = await page.evaluate(() => {
+        const host = document.querySelector("hw-theme-toggle");
+        const button = host.shadowRoot.querySelector("button");
+        const box = button.getBoundingClientRect();
+        return { style: !!host.shadowRoot.querySelector("style"), radius: getComputedStyle(button).borderRadius, size: `${Math.round(box.width)}x${Math.round(box.height)}` };
+      });
+      assert.deepEqual(looks, { style: true, radius: "50%", size: "44x44" });
+      assert.deepEqual(violations, []);
+    } finally {
+      await browser.close();
+    }
   });
 
   it("loads and talks to Supabase and the API with no violations", async () => {
@@ -249,6 +274,45 @@ describe("dashboard on a phone", () => {
         await page.close();
       }
       assert.deepEqual(widths, { "signed out": 375, runs: 375, run: 375 });
+    } finally {
+      await browser.close();
+    }
+  });
+
+  // The sign-in panel is right-aligned to the account controls; with anything after them in the
+  // header it started off the left of a phone's screen (theme switch, review R1-1). The page does
+  // not scroll then, so the check above cannot see it.
+  it("keeps the open sign-in and account panels on screen at 320 and 375 px", async () => {
+    const browser = await chromium.launch();
+    try {
+      const edges = [];
+      const measure = async (page, width, step) => {
+        const panel = page.locator(".hw-signin-panel");
+        await panel.waitFor();
+        const box = await panel.evaluate((el) => el.getBoundingClientRect().toJSON());
+        edges.push(step);
+        assert.ok(box.left >= 0 && box.right <= width, `${step} at ${width} px: ${Math.round(box.left)}..${Math.round(box.right)}`);
+      };
+      for (const width of [320, 375]) {
+        const out = await browser.newPage({ viewport: { width, height: 800 } });
+        await fakeBackend(out, { signedIn: false });
+        await out.goto(`${site.url}/index.html`);
+        await out.getByRole("button", { name: "Email code" }).click();
+        await measure(out, width, "email step");
+        await out.getByRole("textbox", { name: "Email for a sign-in code" }).fill("reviewer@example.org");
+        await out.getByRole("button", { name: "Email me a sign-in code" }).click();
+        await out.getByRole("textbox", { name: /Sign-in code/ }).waitFor();
+        await measure(out, width, "code step");
+        await out.close();
+        const signedIn = await browser.newPage({ viewport: { width, height: 800 } });
+        await fakeBackend(signedIn, { signedIn: true, posted: [] });
+        await signedIn.goto(`${site.url}/index.html`);
+        await signedIn.locator("button.hw-signin-person").click();
+        await signedIn.locator(".hw-signin-panel .hw-signin-user", { hasText: "Signed in as reviewer@example.org" }).waitFor();
+        await measure(signedIn, width, "account");
+        await signedIn.close();
+      }
+      assert.equal(edges.length, 6);
     } finally {
       await browser.close();
     }

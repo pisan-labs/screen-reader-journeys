@@ -3,6 +3,10 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Light and dark mode: sets data-theme on <html> before the first paint. A file, not an inline
+         script, so the Content-Security-Policy keeps script-src 'self' (claude-built-apps
+         platform/src/theme/theme-init.js, copied unchanged; test/theme.test.ts pins it). -->
+    <script src="/hw-theme-init.js"></script>
     <title>Screen Reader Journeys</title>
     <meta name="description" content="Run screen reader journeys against a site and read what a keyboard and screen reader user would hear." />
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1000 1000'%3E%3Crect width='1000' height='1000' rx='250' fill='%23312E81'/%3E%3Cg transform='translate%280 1000%29 scale%281 -1%29'%3E%3Cpath fill='%23FFFFFF' d='M557 253V442Q557 467 541 483Q525 499 501 499Q484 499 471 492Q458 485 450 472Q443 459 443 442L403 461Q403 500 419 529Q435 558 465 574Q494 590 532 590Q571 590 600 574Q629 558 645 530Q661 502 661 465V253ZM339 253V747H443V253Z'/%3E%3Cpath fill='%23FF7A45' d='M750 893 L781 781 L893 750 L781 719 L750 607 L719 719 L607 750 L719 781Z'/%3E%3C/g%3E%3C/svg%3E%0A" />
@@ -14,7 +18,12 @@
     <header class="site-header">
       <div class="wrap header-row">
         <a class="site-name" href="#/">Screen Reader Journeys</a>
-        <div id="account" class="account" role="region" aria-label="Account"></div>
+        <div class="header-end">
+          <!-- The switch first, then the sign-in (platform README): the sign-in panel is anchored to the right edge of
+               its group, which must stay the last thing in the header (review R1-1). -->
+          <hw-theme-toggle></hw-theme-toggle>
+          <div id="account" class="account" role="region" aria-label="Account"></div>
+        </div>
       </div>
     </header>
     <main id="main" tabindex="-1" class="wrap">
