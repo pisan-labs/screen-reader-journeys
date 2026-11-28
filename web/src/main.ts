@@ -3,6 +3,9 @@
  * API at VITE_API_URL. Without the build's values it says what is missing. Opened anywhere but its
  * one address (VITE_SITE_URL, src/canonical.ts), it first moves there.
  */
+// The light and dark mode switch first: it defines <hw-theme-toggle> in the header (claude-built-apps
+// platform/src/theme/hw-theme.js, copied unchanged; test/theme.test.ts pins it).
+import './lib/hw-theme.js';
 import './styles.css';
 import { startDashboard, type DashboardClient } from './app';
 import { canonicalHref, canonicalOrigin, signInReturn } from './canonical';

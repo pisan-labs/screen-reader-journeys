@@ -2,7 +2,7 @@
    always written out in words, and colour only repeats it. */
 
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
   --bg: #ffffff;
   --surface: #f3f4f6;
   --text: #1b1b1f;
@@ -19,8 +19,32 @@
   --busy-bg: #fff4e0;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
+/* The dark set, twice and the same: for the light and dark mode switch's choice (data-theme on
+   <html>, set before the first paint by hw-theme-init.js) and, until a choice is made, for the
+   device's setting. Both are for screens only, so paper gets the light set. */
+@media screen {
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #121316;
+    --surface: #1f2126;
+    --text: #e8e8ec;
+    --muted: #c4c6d0;
+    --border: #9a9ca6;
+    --accent: #a8c7fa;
+    --on-accent: #0b1a33;
+    --focus: #a8c7fa;
+    --ok: #9ad9a8;
+    --ok-bg: #0f2a17;
+    --bad: #ffb4ab;
+    --bad-bg: #3b1111;
+    --busy: #ffd28a;
+    --busy-bg: #33240a;
+  }
+}
+
+@media screen and (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
     --bg: #121316;
     --surface: #1f2126;
     --text: #e8e8ec;
@@ -163,6 +187,24 @@ a {
   flex-wrap: wrap;
   align-items: center;
   gap: 0.5rem 1rem;
+  min-width: 0;
+}
+
+/* The account controls, then the light and dark mode switch, last in the header and never on a
+   line of its own. */
+.header-end {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  margin-left: auto;
+  min-width: 0;
+}
+
+hw-theme-toggle:not([hidden]) {
+  display: inline-flex;
+  flex: none;
+  width: var(--hw-theme-toggle-size, 44px);
+  height: var(--hw-theme-toggle-size, 44px);
 }
 
 .site-footer {
@@ -426,5 +468,17 @@ thead th {
 
   .facts dd {
     margin-bottom: 0.5rem;
+  }
+}
+
+@media print {
+  hw-theme-toggle {
+    display: none !important;
+  }
+
+  /* Paper drops the fill unless told: a filled button's label takes the ink. */
+  button:not(.secondary):not(.link-button),
+  .button {
+    color: var(--text);
   }
 }
