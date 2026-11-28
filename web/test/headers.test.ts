@@ -7,6 +7,7 @@ import {
   contentSecurityPolicy,
   cspHash,
   headersFile,
+  HW_THEME_STYLE_CSP,
   licensesFile,
   packageOf,
   siteScript,
@@ -89,6 +90,16 @@ describe('the Content-Security-Policy', () => {
     expect(policy).toContain("frame-ancestors 'none'");
     expect(contentSecurityPolicy({ supabaseUrl: '', apiUrl: '', styles: [], styleAttributes: [] })).toContain("style-src 'self'; img-src");
     expect(headersFile('P')).toBe('/*\n  Content-Security-Policy: P\n');
+  });
+
+  it("adds the theme switch's fallback style by hash, at the end of style-src, and changes nothing else", () => {
+    const input = { supabaseUrl: 'https://auth.hintwise.org', apiUrl: 'https://api.test', styles: ['a{}'], styleAttributes: ['c:d'] };
+    const before = contentSecurityPolicy(input);
+    const after = contentSecurityPolicy({ ...input, styleHashes: [HW_THEME_STYLE_CSP] });
+    expect(after).toBe(before.replace(/(style-src [^;]*)/, `$1 ${HW_THEME_STYLE_CSP}`));
+    expect(after.split(HW_THEME_STYLE_CSP)).toHaveLength(2);
+    // vite.config.ts passes it to the build's policy.
+    expect(readFileSync('vite.config.ts', 'utf8')).toMatch(/styleHashes: \[HW_THEME_STYLE_CSP\]/);
   });
 });
 

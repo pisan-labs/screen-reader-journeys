@@ -4,7 +4,7 @@
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { contentSecurityPolicy } from '../src/build/headers';
+import { contentSecurityPolicy, cspHash, HW_THEME_STYLE_CSP } from '../src/build/headers';
 
 const sha = (s: string | Uint8Array, enc: 'hex' | 'base64'): string => createHash('sha256').update(s).digest(enc);
 
@@ -176,6 +176,20 @@ describe('the switch in the header', () => {
     expect(rules('.header-end')).not.toMatch(/flex-wrap:\s*wrap/);
     expect(rules('hw-theme-toggle:not([hidden])')).toMatch(/flex:\s*none/);
     expect(rules('hw-theme-toggle:not([hidden])')).toMatch(/width:\s*var\(--hw-theme-toggle-size, 44px\)/);
+  });
+
+  it("has the policy's hash of the <style> it adds where constructed stylesheets are missing (Safari before 16.4)", () => {
+    const proto = CSSStyleSheet.prototype as unknown as Record<string, unknown>;
+    const saved = Object.getOwnPropertyDescriptor(proto, 'replaceSync');
+    delete proto.replaceSync;
+    try {
+      const host = document.body.appendChild(document.createElement('hw-theme-toggle'));
+      const style = host.shadowRoot!.querySelector('style');
+      expect(style).not.toBeNull();
+      expect(cspHash(style!.textContent!)).toBe(HW_THEME_STYLE_CSP);
+    } finally {
+      if (saved) Object.defineProperty(proto, 'replaceSync', saved);
+    }
   });
 
   it('says what it will do, switches the page at once and remembers the choice', () => {

@@ -215,6 +215,31 @@ describe("dashboard under its Content-Security-Policy", () => {
     assert.match(csp, /script-src 'self' https:\/\/challenges\.cloudflare\.com(;|$)/);
     assert.match(csp, new RegExp(`connect-src 'self' ${SUPABASE} ${API}(;|$)`));
     assert.match(csp, /frame-ancestors 'none'/);
+    // The theme switch's fallback <style>, for browsers without constructed stylesheets (web/src/build/headers.ts).
+    assert.match(csp, /style-src [^;]*'sha256-tNUGw7LItOaI5ajM98DiNLm0frYaQ8fVgVRz4\/I6Xy4='(;|$)/);
+  });
+
+  it("styles the theme switch with no violation where constructed stylesheets are missing (Safari before 16.4)", async () => {
+    const browser = await chromium.launch();
+    try {
+      const page = await browser.newPage();
+      const violations = [];
+      page.on("console", (message) => /Content Security Policy|Refused to/i.test(message.text()) && violations.push(message.text()));
+      await page.addInitScript(() => delete CSSStyleSheet.prototype.replaceSync);
+      await fakeBackend(page, { signedIn: false });
+      await page.goto(`${site.url}/index.html`);
+      await page.locator("button.hw-signin-google").waitFor();
+      const looks = await page.evaluate(() => {
+        const host = document.querySelector("hw-theme-toggle");
+        const button = host.shadowRoot.querySelector("button");
+        const box = button.getBoundingClientRect();
+        return { style: !!host.shadowRoot.querySelector("style"), radius: getComputedStyle(button).borderRadius, size: `${Math.round(box.width)}x${Math.round(box.height)}` };
+      });
+      assert.deepEqual(looks, { style: true, radius: "50%", size: "44x44" });
+      assert.deepEqual(violations, []);
+    } finally {
+      await browser.close();
+    }
   });
 
   it("loads and talks to Supabase and the API with no violations", async () => {

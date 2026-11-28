@@ -5,7 +5,7 @@
  *   service-role or secret key would give every visitor full access to the database.
  * - The Content-Security-Policy allows exactly the Supabase URL and the API, the Turnstile
  *   check that sign-in may ask for, and, by hash, the inline styles the page uses: the HintWise
- *   footer's, the sign-in panel's and the Google G's.
+ *   footer's, the sign-in panel's, the Google G's and the theme switch's fallback.
  */
 import { createHash } from 'node:crypto';
 
@@ -104,6 +104,15 @@ export function styleAttributes(markup: string): string[] {
   return [...markup.matchAll(/\sstyle="([^"]*)"/g)].map((m) => m[1]);
 }
 
+/**
+ * The light and dark mode switch (src/lib/hw-theme.js, a copy of claude-built-apps
+ * platform/src/theme/hw-theme.js) styles itself with a constructed stylesheet, which style-src
+ * does not govern. Browsers without constructed stylesheets (Safari before 16.4) get a <style>
+ * element with the same text instead: this is its hash, so the switch is styled there too.
+ * test/theme.test.ts recomputes it from the copy.
+ */
+export const HW_THEME_STYLE_CSP = "'sha256-tNUGw7LItOaI5ajM98DiNLm0frYaQ8fVgVRz4/I6Xy4='";
+
 export interface PolicyInput {
   supabaseUrl: string;
   apiUrl: string;
@@ -111,10 +120,12 @@ export interface PolicyInput {
   styles: string[];
   /** style="…" attributes the page uses. */
   styleAttributes: string[];
+  /** Hash sources for inline styles whose text is not at hand here (HW_THEME_STYLE_CSP). */
+  styleHashes?: string[];
 }
 
 export function contentSecurityPolicy(input: PolicyInput): string {
-  const hashes = [...new Set([...input.styles, ...input.styleAttributes].map(cspHash))];
+  const hashes = [...new Set([...[...input.styles, ...input.styleAttributes].map(cspHash), ...(input.styleHashes ?? [])])];
   const styleSrc = ["'self'", ...(input.styleAttributes.length ? ["'unsafe-hashes'"] : []), ...hashes];
   return [
     "default-src 'none'",
