@@ -190,8 +190,9 @@ a {
   min-width: 0;
 }
 
-/* The account controls, then the light and dark mode switch, last in the header and never on a
-   line of its own. */
+/* The light and dark mode switch, then the account controls, at the end of the header: the switch
+   is never on a line of its own, and the sign-in panel (right-aligned to the account controls)
+   keeps the screen's right edge. */
 .header-end {
   display: flex;
   align-items: center;

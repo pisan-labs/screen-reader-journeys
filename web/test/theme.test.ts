@@ -162,12 +162,15 @@ describe('the switch in the header', () => {
   const toggle = (): HTMLElement => document.querySelector('header.site-header hw-theme-toggle')!;
   const button = (): HTMLButtonElement => toggle().shadowRoot!.querySelector('button')!;
 
-  it('is last in the header, after the account controls, in a group that does not wrap it onto a line of its own', () => {
+  it('comes before the account controls at the end of the header, in a group that does not wrap it onto a line of its own', () => {
     expect(document.querySelectorAll('hw-theme-toggle')).toHaveLength(1);
     const end = toggle().parentElement!;
     expect(end.classList.contains('header-end')).toBe(true);
-    expect(end.lastElementChild).toBe(toggle());
-    expect(toggle().previousElementSibling?.id).toBe('account');
+    // The sign-in panel is right-aligned to #account; with the switch after it, the panel started
+    // 44 px off a phone's screen (review R1-1). test/dashboard.test.js measures the open panels.
+    expect(end.firstElementChild).toBe(toggle());
+    expect(end.lastElementChild?.id).toBe('account');
+    expect(end.parentElement!.lastElementChild).toBe(end);
     expect(end.parentElement!.classList.contains('header-row')).toBe(true);
     expect(rules('.header-end')).toMatch(/display:\s*flex/);
     expect(rules('.header-end')).not.toMatch(/flex-wrap:\s*wrap/);

@@ -106,3 +106,5 @@ Append-only journal, oldest first. Earlier history: `git log` and `docs/handoff.
 2026-11-25 [code] Minors R21.2-1 to -4, R22.3-1, R22.F-1: "And more." past the cap, a repeated start keeps the step limit, EAI_AGAIN only, and the missing tests.
 
 2026-11-28 [code] Light and dark mode switch at the end of the header (claude-built-apps platform/src/theme, copied unchanged); the init script is a file, so the CSP keeps script-src 'self'; dark styles follow the switch, and paper gets the light set.
+
+2026-11-28 [code] Theme switch review R1-1: the switch comes before the sign-in in the header, so the sign-in and account panels stay on a phone's screen (test/dashboard.test.js measures them open at 320 and 375 px).

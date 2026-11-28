@@ -253,6 +253,45 @@ describe("dashboard on a phone", () => {
       await browser.close();
     }
   });
+
+  // The sign-in panel is right-aligned to the account controls; with anything after them in the
+  // header it started off the left of a phone's screen (theme switch, review R1-1). The page does
+  // not scroll then, so the check above cannot see it.
+  it("keeps the open sign-in and account panels on screen at 320 and 375 px", async () => {
+    const browser = await chromium.launch();
+    try {
+      const edges = [];
+      const measure = async (page, width, step) => {
+        const panel = page.locator(".hw-signin-panel");
+        await panel.waitFor();
+        const box = await panel.evaluate((el) => el.getBoundingClientRect().toJSON());
+        edges.push(step);
+        assert.ok(box.left >= 0 && box.right <= width, `${step} at ${width} px: ${Math.round(box.left)}..${Math.round(box.right)}`);
+      };
+      for (const width of [320, 375]) {
+        const out = await browser.newPage({ viewport: { width, height: 800 } });
+        await fakeBackend(out, { signedIn: false });
+        await out.goto(`${site.url}/index.html`);
+        await out.getByRole("button", { name: "Email code" }).click();
+        await measure(out, width, "email step");
+        await out.getByRole("textbox", { name: "Email for a sign-in code" }).fill("reviewer@example.org");
+        await out.getByRole("button", { name: "Email me a sign-in code" }).click();
+        await out.getByRole("textbox", { name: /Sign-in code/ }).waitFor();
+        await measure(out, width, "code step");
+        await out.close();
+        const signedIn = await browser.newPage({ viewport: { width, height: 800 } });
+        await fakeBackend(signedIn, { signedIn: true, posted: [] });
+        await signedIn.goto(`${site.url}/index.html`);
+        await signedIn.locator("button.hw-signin-person").click();
+        await signedIn.locator(".hw-signin-panel .hw-signin-user", { hasText: "Signed in as reviewer@example.org" }).waitFor();
+        await measure(signedIn, width, "account");
+        await signedIn.close();
+      }
+      assert.equal(edges.length, 6);
+    } finally {
+      await browser.close();
+    }
+  });
 });
 
 describe("dashboard at its one address (R18.1-2)", () => {
